@@ -51,7 +51,37 @@ labels:
 
 ### `repo`
 
-*string · default: compose service, else container name (for `sabon.backup.<name>`: `<service>-<name>`)* — The app / repo name. Determines the per-target repo (`<path>/<repo>` or `{app}` → `repo`); sibling containers of the same app should share one `repo`.
+*string · default: `<project>-<service>` in Compose, else container name (named specs append `-<name>`)* — The app / repo name. Determines the per-target repo (`<path>/<repo>` or `{app}` → `repo`). With a service label but no project label, the default remains the service name. Swarm defaults remain the full service name. An explicit `repo` always wins. Each app name must have exactly one backup-spec owner, including when specs select different targets.
+
+#### Migrating existing repositories
+
+Compose defaults previously used only `<service>` (or `<service>-<name>` for
+named specs). To keep writing to an existing repository, set `repo` explicitly
+to that old name on its **single owner** before upgrading. For example, a
+Compose project `alpha` with service `db` can retain its existing `db` repository
+with `repo: db`; without that override it now uses `alpha-db`.
+
+No repository is renamed, moved, merged, or deleted automatically. Adopting the
+new default starts a separate repository/history. Old snapshots remain accessible
+through `sabon snapshots --app db --target <target>` and staging restore with
+`sabon restore --app db --target <target> --into <host-dir>`. In-place restore and
+app API operations require a discovered, uniquely owned app; pin `repo: db` to
+access the legacy app through those paths.
+
+Previously documented sibling containers sharing a plain `repo` are now
+rejected, just like conflicting named specs. Assign distinct repositories, or
+choose one backup owner and include sibling data via `extraVolumes`/`extraPaths`
+(with appropriate hooks). Disable/remove the other backup specs. Compose
+replicas and ambiguous hyphen combinations in generated names also require
+explicit unique names or a single owner.
+
+Ownership conflicts fail discovery, validation, one-shot backups and app API
+operations with an error naming the repositories and owners. Scheduled
+reconciliation records failure (`sabon_ready=0`) and suspends **all** backup/check/prune schedules
+until the conflict is fixed; it never reports success with partial coverage.
+Already running operations are not cancelled. Ownership is checked within the
+current instance's discovered jobs, not across separate sabon instances or
+different target configurations pointing to the same physical repository.
 
 ### `auto`
 
@@ -211,9 +241,9 @@ you want to restore independently — add named specs next to (or instead of) it
 ```yaml
 labels:
   sabon.enable: "true"
-  sabon.backup: |              # repo: compose service name, as before
+  sabon.backup: |              # repo: <project>-<service> in Compose
     auto: true
-  sabon.backup.media: |        # repo: <service>-media
+  sabon.backup.media: |        # repo: <project>-<service>-media in Compose
     auto: false
     extraPaths: [/srv/media]
     targets: [onsite]
@@ -221,21 +251,16 @@ labels:
 
 Each `sabon.backup.<name>` is a full spec (every field above), backed up as its
 own job with its own schedule, retention, hooks and repository. Without `repo`,
-the repository is named `<service>-<name>` (compose service, else container
-name), so the same `<name>` on two services never collides; set `repo` to
-choose another.
+the repository appends `-<name>` to the default app identity described under
+[`repo`](#repo), for example `alpha-db-media`. Set `repo` to choose another.
 
 - `<name>` is lower-case `[a-z0-9-]`, starting and ending alphanumeric.
 - `auto` keeps its default of `true`, so every spec on the container would
   include the container's own mounts. Set `auto: false` on specs that only back
   up their `extraPaths`/`extraVolumes`.
-- A named spec must own its repository. If it resolves to the same repository
-  as any other spec (named or plain, on any container), sabon logs an error and
-  backs up **none** of them — rather than picking one and silently skipping the
-  other's data, or restoring into the wrong container. Fix it with a distinct
-  `repo`. Plain `sabon.backup` labels sharing one `repo` (sibling containers of
-  an app) keep their existing behaviour.
-- The plain `sabon.backup` label is unchanged and stays the common case.
+- Every spec, named or plain, must own its repository uniquely. Conflicts fail
+  discovery rather than selecting an arbitrary backup or restore destination.
+- The plain `sabon.backup` label remains the common case.
 
 ## Validating and schema
 

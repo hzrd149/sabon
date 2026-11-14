@@ -74,22 +74,23 @@ func (d *Discoverer) List(ctx context.Context) ([]discovery.Job, error) {
 			d.log.Debug("discovered job", "app", job.App, "container", name(c), "sources", len(job.Sources))
 		}
 	}
-	jobs, collisions := discovery.DropNamedCollisions(jobs)
-	for app, containers := range collisions {
-		d.log.Error("repository claimed by a named backup and another backup, backing up none of them", "app", app, "containers", containers)
+	if err := discovery.ValidateOwnership(jobs); err != nil {
+		return nil, err
 	}
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].App < jobs[j].App })
 	return jobs, nil
 }
 
 // resolve turns a container + one of its backup specs into a Job with concrete
-// sources. The singleton's fallback app is the compose service, else the
-// container name.
+// sources. The fallback app is <compose-project>-<service>, the service alone
+// if the project label is absent, or the container name outside Compose.
 func (d *Discoverer) resolve(ctx context.Context, cname string, labels map[string]string, instance string, b label.Named) (discovery.Job, error) {
 	spec := b.Spec
 	service := labels[discovery.ComposeServiceLabel]
 	if service == "" {
 		service = cname
+	} else if project := labels[discovery.ComposeProjectLabel]; project != "" {
+		service = project + "-" + service
 	}
 	app := b.App(service)
 	if err := discovery.ValidAppName(app); err != nil {
