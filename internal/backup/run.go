@@ -54,6 +54,9 @@ func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target 
 	}
 
 	log := o.log.With("app", job.App, "target", target.Name)
+	if err := o.requireHookCompletion(ctx); err != nil {
+		return mover.Result{}, err
+	}
 	if err := o.requireNoReaders(ctx, job.App, job.Container); err != nil {
 		return mover.Result{}, err
 	}
@@ -63,6 +66,13 @@ func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target 
 	stopAttempted, keptMover := false, false
 	var snapCleanup func(context.Context)
 	defer func() {
+		checkCtx, cancel := cleanupContext(ctx)
+		hookErr := o.requireHookCompletion(checkCtx)
+		cancel()
+		if hookErr != nil {
+			retErr = errors.Join(retErr, hookErr)
+			return
+		}
 		if keptMover {
 			retErr = errors.Join(retErr, fmt.Errorf("recovery deferred: mover may still be reading sources; snapshots and hook artifacts retained; verify mover exit and recover the app manually"))
 			return
@@ -258,6 +268,9 @@ func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discover
 			return err
 		}
 		defer releaseApp()
+		if err := o.requireHookCompletion(ctx); err != nil {
+			return err
+		}
 		if err := o.requireNoReaders(ctx, app, sourceContainer(job)); err != nil {
 			return err
 		}
