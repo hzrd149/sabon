@@ -45,6 +45,9 @@ func (h *Hooks) RunOneShot(ctx context.Context, spec engine.RunSpec) (retErr err
 	if spec.Image == "" {
 		return fmt.Errorf("hook: run mode needs an image")
 	}
+	if spec.Name == "" {
+		return fmt.Errorf("hook: run mode needs a unique operation name")
+	}
 	mounts, err := hookMounts(spec.Volumes)
 	if err != nil {
 		return err
@@ -71,7 +74,31 @@ func (h *Hooks) RunOneShot(ctx context.Context, spec engine.RunSpec) (retErr err
 
 	created, err := h.cli.ServiceCreate(ctx, sspec, swarm.ServiceCreateOptions{})
 	if err != nil {
-		return fmt.Errorf("create hook service: %w", err)
+		// The manager may have accepted the request before the response was
+		// lost. Preserve the unique operation name even without a service ID.
+		// Absence is not evidence of rejection: creation may still be in flight.
+		var serviceID string
+		h.pending.Add("swarm-service-name", spec.Name, func(checkCtx context.Context) error {
+			if serviceID == "" {
+				svc, _, inspectErr := h.cli.ServiceInspectWithRaw(checkCtx, spec.Name, swarm.ServiceInspectOptions{})
+				if inspectErr != nil {
+					return fmt.Errorf("resolve uncertain creation: %w", inspectErr)
+				}
+				if svc.ID == "" || svc.Spec.Name != spec.Name || svc.Spec.Labels[engine.HookLabelKey] != spec.Name {
+					return fmt.Errorf("no matching hook operation evidence; manual recovery required")
+				}
+				serviceID = svc.ID // never bind this operation to a replacement
+			}
+			tasks, taskErr := h.cli.TaskList(checkCtx, swarm.TaskListOptions{Filters: filters.NewArgs(filters.Arg("service", serviceID))})
+			if taskErr != nil {
+				return taskErr
+			}
+			if !tasksTerminated(tasks) {
+				return fmt.Errorf("service %s lacks confirmed task termination; manual recovery required if evidence is unavailable", serviceID)
+			}
+			return nil
+		})
+		return &engine.HookUncertain{Kind: "swarm-service-name", ID: spec.Name, Err: fmt.Errorf("create hook service: %w", err)}
 	}
 	code, err := h.wait(ctx, created.ID)
 	if err != nil {
