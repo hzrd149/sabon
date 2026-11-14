@@ -2,10 +2,13 @@ package docker
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
 
+	"github.com/davidborzek/sabon/internal/discovery"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
@@ -15,9 +18,11 @@ import (
 // by discovery are implemented (others panic if ever called).
 type fakeDocker struct {
 	client.APIClient
-	list    []container.Summary
-	mounts  map[string][]container.MountPoint
-	gotOpts container.ListOptions
+	list          []container.Summary
+	mounts        map[string][]container.MountPoint
+	gotOpts       container.ListOptions
+	inspectErrors map[string]error
+	inspectCalls  int
 }
 
 func (f *fakeDocker) ContainerList(_ context.Context, opts container.ListOptions) ([]container.Summary, error) {
@@ -26,10 +31,61 @@ func (f *fakeDocker) ContainerList(_ context.Context, opts container.ListOptions
 }
 
 func (f *fakeDocker) ContainerInspect(_ context.Context, name string) (container.InspectResponse, error) {
+	f.inspectCalls++
+	if err := f.inspectErrors[name]; err != nil {
+		return container.InspectResponse{}, err
+	}
 	return container.InspectResponse{
 		ContainerJSONBase: &container.ContainerJSONBase{Name: "/" + name},
 		Mounts:            f.mounts[name],
 	}, nil
+}
+
+func TestListOwnershipBeforeSourceResolution(t *testing.T) {
+	for _, backupKey := range []string{"sabon.backup", "sabon.backup.data"} {
+		for _, inspectFails := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/inspectFails=%t", backupKey, inspectFails), func(t *testing.T) {
+				fd := &fakeDocker{list: []container.Summary{
+					{Names: []string{"/healthy"}, Labels: map[string]string{"sabon.enable": "true", "sabon.backup": "repo: shared\nauto: false\nextraPaths: [/synthetic/healthy]"}},
+					{Names: []string{"/unresolved"}, Labels: map[string]string{"sabon.enable": "true", backupKey: "repo: shared\nauto: true"}},
+				}}
+				if inspectFails {
+					fd.inspectErrors = map[string]error{"unresolved": errors.New("synthetic inspect failure")}
+				}
+				jobs, err := NewDiscoverer(fd, "sabon", false, "cache", "", testLogger()).List(context.Background())
+				if !errors.Is(err, discovery.ErrOwnership) || len(jobs) != 0 {
+					t.Fatalf("want ownership failure before dropping unresolved owner, got jobs=%+v err=%v", jobs, err)
+				}
+				if fd.inspectCalls != 0 {
+					t.Fatalf("resolved sources before checking ownership: %d inspect calls", fd.inspectCalls)
+				}
+			})
+		}
+	}
+}
+
+func TestListOwnershipExcludesUnparsedAndUnmanagedLabels(t *testing.T) {
+	for _, mode := range []string{"malformed", "disabled", "other-instance"} {
+		t.Run(mode, func(t *testing.T) {
+			labels := map[string]string{"sabon.enable": "true", "sabon.instance": "owned", "sabon.backup": "repo: shared\nauto: true"}
+			switch mode {
+			case "malformed":
+				labels["sabon.backup"] += "\nunknownField: true"
+			case "disabled":
+				labels["sabon.enable"] = "false"
+			case "other-instance":
+				labels["sabon.instance"] = "other"
+			}
+			fd := &fakeDocker{list: []container.Summary{
+				{Names: []string{"/healthy"}, Labels: map[string]string{"sabon.enable": "true", "sabon.instance": "owned", "sabon.backup": "repo: shared\nauto: false\nextraPaths: [/synthetic/healthy]"}},
+				{Names: []string{"/excluded"}, Labels: labels},
+			}}
+			jobs, err := NewDiscoverer(fd, "sabon", false, "cache", "owned", testLogger()).List(context.Background())
+			if err != nil || len(jobs) != 1 || jobs[0].Container != "healthy" {
+				t.Fatalf("excluded labels must not claim ownership: jobs=%+v err=%v", jobs, err)
+			}
+		})
+	}
 }
 
 func testLogger() *slog.Logger {
