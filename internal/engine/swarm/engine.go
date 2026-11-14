@@ -302,6 +302,7 @@ func (s *Engine) serviceRunning(ctx context.Context, serviceID string) bool {
 func (s *Engine) runInfo(ctx context.Context, svc swarm.Service) engine.RunInfo {
 	l := svc.Spec.Labels
 	ri := engine.RunInfo{ID: svc.ID, App: l[mover.LabelApp], Target: l[mover.LabelTarget], Action: l[mover.LabelAction], Status: "running"}
+	ri.SourceContainer = l[mover.LabelSourceContainer]
 	tasks, err := s.cli.TaskList(ctx, swarm.TaskListOptions{Filters: filters.NewArgs(filters.Arg("service", svc.ID))})
 	if err != nil || len(tasks) == 0 {
 		return ri

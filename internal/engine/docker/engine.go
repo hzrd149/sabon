@@ -95,6 +95,7 @@ func (d *Engine) inspectRun(ctx context.Context, id string) (engine.RunInfo, err
 	ri := engine.RunInfo{ID: insp.ID, Status: "running"}
 	if insp.Config != nil {
 		ri.App = insp.Config.Labels[mover.LabelApp]
+		ri.SourceContainer = insp.Config.Labels[mover.LabelSourceContainer]
 		ri.Target = insp.Config.Labels[mover.LabelTarget]
 		ri.Action = insp.Config.Labels[mover.LabelAction]
 	}

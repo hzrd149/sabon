@@ -33,8 +33,8 @@ one **mover** container per `(app, target)` pair and the mover does the work:
 
 Runs against the **same repository** are serialized (per-repo lock), so retention
 and prune never collide with a concurrent backup. Different apps back up in
-parallel. The entire backup lifecycle for one app is also serialized across its
-targets, protecting shared hook artifacts. Plain live backups can leave movers
+parallel. Backup lifecycles sharing a source container are serialized across
+named app specs and targets, protecting shared hook artifacts. Plain live backups can leave movers
 running on shutdown; hook-bearing and cold backups require recovery before
 reporting success. See [Hooks](hooks.md#tips) for cleanup and surviving-mover
 semantics and [Architecture](architecture.md#lifecycle-and-robustness).

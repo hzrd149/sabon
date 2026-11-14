@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/davidborzek/sabon/internal/mover"
+
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
@@ -20,7 +22,7 @@ func (c historyClient) ContainerList(context.Context, container.ListOptions) ([]
 	return []container.Summary{{ID: "synthetic-mover"}}, nil
 }
 func (c historyClient) ContainerInspect(context.Context, string) (container.InspectResponse, error) {
-	return container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: "synthetic-mover", State: c.state}}, c.err
+	return container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: "synthetic-mover", State: c.state}, Config: &container.Config{Labels: map[string]string{mover.LabelSourceContainer: "synthetic-source"}}}, c.err
 }
 
 func TestListRunsCannotHideInspectionFailure(t *testing.T) {
@@ -48,6 +50,9 @@ func TestRunHistoryRequiresTerminalState(t *testing.T) {
 		}
 		if runs[0].Status != want {
 			t.Errorf("state=%q outcome=%q want=%q", status, runs[0].Status, want)
+		}
+		if runs[0].SourceContainer != "synthetic-source" {
+			t.Error("lost mover source identity")
 		}
 	}
 }

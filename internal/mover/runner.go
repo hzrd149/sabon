@@ -27,9 +27,10 @@ const LabelKey = "sabon.mover"
 // Labels recording a mover run, used for run history (the API reads them back)
 // and for history-aware reaping.
 const (
-	LabelApp    = "sabon.app"
-	LabelTarget = "sabon.target"
-	LabelAction = "sabon.action"
+	LabelApp             = "sabon.app"
+	LabelSourceContainer = "sabon.source-container"
+	LabelTarget          = "sabon.target"
+	LabelAction          = "sabon.action"
 )
 
 // Request is everything a runtime needs to run one mover. It is the shared

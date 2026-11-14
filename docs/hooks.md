@@ -197,16 +197,23 @@ Compose (no interpolation) use a single `$`.
   (a shorter hook `timeout` still applies). Cold restart is attempted before
   post-hooks so exec-mode cleanup can run inside the application; restart has its
   own five-minute budget. Context deadlines require runtime cooperation.
-- Backup lifecycles for the same app are serialized across targets in one sabon
+- Backup lifecycles for the same source container are serialized across named
+  app specs and targets in one sabon
   process, including the entire pre-hook/mover/cleanup sequence. This prevents a
   second target overwriting a shared dump while the first reads it, or deleting
-  it prematurely. Each target produces its own dump. Different apps must use
-  distinct artifacts; this is not a cross-process hook lock.
+  it prematurely. In-place restore uses the same exclusion. Each target produces
+  its own dump. When no source identity is available, exclusion falls back to
+  the app name. Different containers must use distinct artifacts; this is not a
+  cross-process hook lock.
 - Hook-bearing movers are not intentionally left running on graceful shutdown.
   If a mover survives, or runtime inspection cannot establish that it exited,
   cleanup is deferred and the operation fails explicitly. Source snapshots and
   dump artifacts are retained. New runs check for surviving app movers before
-  starting hooks, including movers from an earlier daemon. Verify mover exit
+  starting hooks, including movers from an earlier daemon. New backup and
+  in-place restore movers carry `sabon.source-container`, allowing differently
+  named specs sharing a source to detect each other's readers. Older movers
+  without that label can only be matched by app name; cross-app exclusion for
+  those movers requires runtime-level source fencing. Verify mover exit
   before manually recovering application state and removing artifacts. Deferred
   hooks are not persisted or replayed automatically after a crash.
 - Post-hook and restart failures join the primary error in the final result.

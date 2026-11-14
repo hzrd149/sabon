@@ -14,7 +14,7 @@ import (
 // RunTarget returns snapshot statistics independently of the overall lifecycle
 // error. A created snapshot does not imply successful application recovery.
 func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target api.Target) (res mover.Result, retErr error) {
-	releaseApp, err := o.lifecycles.lock(ctx, job.App)
+	releaseApp, err := o.lifecycles.lock(ctx, lifecycleKey(job.App, job.Container))
 	if err != nil {
 		return mover.Result{}, err
 	}
@@ -54,7 +54,7 @@ func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target 
 	}
 
 	log := o.log.With("app", job.App, "target", target.Name)
-	if err := o.requireNoReaders(ctx, job.App); err != nil {
+	if err := o.requireNoReaders(ctx, job.App, job.Container); err != nil {
 		return mover.Result{}, err
 	}
 
@@ -121,6 +121,7 @@ func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target 
 		Node:           job.Node,
 	}
 	log.Debug("spawning mover", "name", req.Name, "image", req.Image, "user", req.User, "sources", len(srcMounts))
+	req.Labels[mover.LabelSourceContainer] = job.Container
 	res, kept, runErr := o.eng.RunMover(ctx, req)
 	keptMover = kept
 
@@ -128,7 +129,7 @@ func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target 
 		// Runtime removal can fail after cancellation. Confirm exit before any
 		// cleanup that could invalidate data still mounted by that mover.
 		checkCtx, cancel := cleanupContext(ctx)
-		if err := o.requireNoReaders(checkCtx, job.App); err != nil {
+		if err := o.requireNoReaders(checkCtx, job.App, job.Container); err != nil {
 			keptMover = true
 			runErr = errors.Join(runErr, err)
 		}
@@ -252,12 +253,12 @@ type RestoreOptions struct {
 // app first. restic output is written to out.
 func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discovery.Job, target api.Target, opts RestoreOptions, out io.Writer) (retErr error) {
 	if opts.Into == "" {
-		releaseApp, err := o.lifecycles.lock(ctx, app)
+		releaseApp, err := o.lifecycles.lock(ctx, lifecycleKey(app, sourceContainer(job)))
 		if err != nil {
 			return err
 		}
 		defer releaseApp()
-		if err := o.requireNoReaders(ctx, app); err != nil {
+		if err := o.requireNoReaders(ctx, app, sourceContainer(job)); err != nil {
 			return err
 		}
 	}
@@ -288,7 +289,7 @@ func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discover
 			log.Info("stopping container for in-place restore", "container", job.Container)
 			defer func() {
 				checkCtx, checkCancel := cleanupContext(ctx)
-				err := o.requireNoReaders(checkCtx, app)
+				err := o.requireNoReaders(checkCtx, app, sourceContainer(job))
 				checkCancel()
 				if err != nil {
 					retErr = errors.Join(retErr, fmt.Errorf("restart after restore deferred: %w", err))
@@ -317,6 +318,10 @@ func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discover
 		node = job.Node
 	}
 
+	labels := o.moverLabels(target, app, "restore")
+	if opts.Into == "" {
+		labels[mover.LabelSourceContainer] = sourceContainer(job)
+	}
 	_, _, err = o.eng.RunMover(ctx, mover.Request{
 		Name:    moverName(app, target.Name),
 		Image:   o.image,
@@ -328,7 +333,7 @@ func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discover
 		Mounts:  mounts,
 		Binds:   binds,
 		Stdout:  out,
-		Labels:  o.moverLabels(target, app, "restore"),
+		Labels:  labels,
 		Retain:  true,
 		Node:    node,
 	})

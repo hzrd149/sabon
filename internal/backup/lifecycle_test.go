@@ -246,7 +246,7 @@ func TestSurvivingMoverDefersCleanupAndBlocksNewHooks(t *testing.T) {
 			var calls []string
 			o.hooks = lifecycleHooks{exec: func(_ context.Context, cmd string) error { calls = append(calls, cmd); return nil }}
 			e.run = func(context.Context, mover.Request) (mover.Result, bool, error) {
-				e.runs = []engine.RunInfo{{ID: "survivor", Action: "backup", Status: "running"}}
+				e.runs = []engine.RunInfo{{ID: "survivor", App: job.App, Action: "backup", Status: "running"}}
 				return mover.Result{}, kept, context.Canceled
 			}
 			_, err := o.RunTarget(context.Background(), job, target)
@@ -389,4 +389,81 @@ func TestCleanupTimeoutDoesNotSkipLaterHooks(t *testing.T) {
 			t.Fatalf("cleanup elapsed=%v, want five minute budget", elapsed)
 		}
 	})
+}
+
+func TestNamedSpecsShareContainerLifecycle(t *testing.T) {
+	for _, restore := range []bool{false, true} {
+		t.Run(fmt.Sprint("restore=", restore), func(t *testing.T) {
+			o, job, target, e := lifecycleFixture(t)
+			job.Spec.Stop = true
+			synctest.Test(t, func(t *testing.T) {
+				var stops, starts, reading atomic.Int32
+				release := make(chan struct{})
+				done := make(chan error, 2)
+				o.quiesce = lifecycleQuiescer{stop: func(context.Context) error {
+					if reading.Load() != 0 {
+						t.Error("second spec stopped a container with an active reader")
+					}
+					stops.Add(1)
+					return nil
+				}, start: func(context.Context) error {
+					if reading.Load() != 0 {
+						t.Error("premature restart during another spec's read")
+					}
+					starts.Add(1)
+					return nil
+				}}
+				e.run = func(_ context.Context, req mover.Request) (mover.Result, bool, error) {
+					if req.Labels[mover.LabelSourceContainer] != job.Container {
+						t.Error("missing shared source identity label")
+					}
+					if reading.Add(1) != 1 {
+						t.Error("named specs overlap")
+					}
+					<-release
+					reading.Add(-1)
+					return mover.Result{}, false, nil
+				}
+				go func() { _, err := o.RunTarget(context.Background(), job, target); done <- err }()
+				synctest.Wait()
+				other := job
+				other.App = "second-named-spec"
+				otherTarget := target
+				otherTarget.Name = "second-repo"
+				go func() {
+					if restore {
+						done <- o.RunRestore(context.Background(), other.App, &other, otherTarget, RestoreOptions{Stop: true}, io.Discard)
+						return
+					}
+					_, err := o.RunTarget(context.Background(), other, otherTarget)
+					done <- err
+				}()
+				synctest.Wait()
+				if stops.Load() != 1 || starts.Load() != 0 {
+					t.Fatalf("source not excluded: stops=%d starts=%d", stops.Load(), starts.Load())
+				}
+				close(release)
+				for range 2 {
+					if err := <-done; err != nil {
+						t.Fatal(err)
+					}
+				}
+				if stops.Load() != 2 || starts.Load() != 2 {
+					t.Fatal("unbalanced recovery")
+				}
+			})
+		})
+	}
+}
+
+func TestSurvivingNamedSpecBlocksSharedSource(t *testing.T) {
+	o, job, target, e := lifecycleFixture(t)
+	e.runs = []engine.RunInfo{{App: "different-named-spec", SourceContainer: job.Container, ID: "survivor", Action: "backup", Status: "running"}}
+	o.hooks = lifecycleHooks{exec: func(context.Context, string) error { t.Error("hook changed shared source"); return nil }}
+	if _, err := o.RunTarget(context.Background(), job, target); err == nil {
+		t.Fatal("surviving sibling spec was ignored")
+	}
+	if err := o.RunRestore(context.Background(), job.App, &job, target, RestoreOptions{Stop: true}, io.Discard); err == nil {
+		t.Fatal("restore ignored sibling spec")
+	}
 }

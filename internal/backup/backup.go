@@ -39,7 +39,7 @@ type Orchestrator struct {
 	cacheOK    bool
 	sem        chan struct{}          // caps concurrent backups when SABON_MAX_PARALLEL > 0
 	snaps      []snapshot.Snapshotter // source-snapshot providers, supplied by the runtime (Docker: zfs; swarm: none); selected per run by mode
-	lifecycles lifecycleLocks         // serialises app source mutation and recovery across targets
+	lifecycles lifecycleLocks         // serialises source mutation and recovery across named specs/targets
 }
 
 // New returns an Orchestrator. image is the resolved mover image reference.
