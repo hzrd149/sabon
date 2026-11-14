@@ -1,0 +1,77 @@
+name: hardening images
+
+on:
+  push:
+    branches: [integration/standalone-hardening]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: hardening-images-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  images:
+    if: github.ref == 'refs/heads/integration/standalone-hardening'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: sabon
+            dockerfile: Dockerfile
+            suffix: ''
+          - name: mover
+            dockerfile: Dockerfile.mover
+            suffix: /mover
+    steps:
+      - uses: actions/checkout@v7
+      - name: Image coordinates
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SUFFIX: ${{ matrix.suffix }}
+        run: |
+          echo "name=ghcr.io/${REPOSITORY,,}${SUFFIX}" >> "$GITHUB_OUTPUT"
+          echo "version=sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v6
+        id: meta
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=raw,value=standalone-hardening
+            type=raw,value=${{ steps.image.outputs.version }}
+      - uses: docker/build-push-action@v7
+        id: build
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: VERSION=${{ steps.image.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=hardening-${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=hardening-${{ matrix.name }}
+      - name: Published image
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          VERSION: ${{ steps.image.outputs.version }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### ${IMAGE}"
+            echo "Commit tag: \`${IMAGE}:${VERSION}\`"
+            echo "Digest pin: \`${IMAGE}@${DIGEST}\`"
+            echo "Tracking tag: \`${IMAGE}:standalone-hardening\`"
+          } >> "$GITHUB_STEP_SUMMARY"
