@@ -229,18 +229,17 @@ func TestSwarmQuiesceInstanceScoped(t *testing.T) {
 	}
 }
 
-func TestSwarmRunMoverTimeoutRemoved(t *testing.T) {
+func TestSwarmRunMoverTimeoutRetainsUncertainWorker(t *testing.T) {
 	f := &fakeSwarm{} // task never reaches a terminal state
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Minute))
 	defer cancel()
 	req := mover.Request{Name: "m", Image: "img", Spec: mover.Spec{App: "demo"}, Retain: true}
-	if _, _, err := testSwarm(f).RunMover(ctx, req); err == nil {
-		t.Error("a timed-out RunMover must return an error")
+	if _, kept, err := testSwarm(f).RunMover(ctx, req); err == nil || !kept {
+		t.Error("a timed-out RunMover must return an error and report possible surviving worker")
 	}
-	// Retain must NOT keep a still-running (timed-out) mover: it holds the repo
-	// lock and must be removed.
-	if len(f.removed) != 1 || f.removed[0] != "svc1" {
-		t.Errorf("timed-out mover must be removed despite Retain; removed=%v", f.removed)
+	// Service removal is asynchronous: keep identity until exit is confirmed.
+	if len(f.removed) != 0 {
+		t.Errorf("uncertain worker identity removed: %v", f.removed)
 	}
 }
 
@@ -255,7 +254,7 @@ func TestSwarmReapStrayAndHistory(t *testing.T) {
 		{ID: "stray", Spec: swarm.ServiceSpec{Annotations: swarm.Annotations{Labels: map[string]string{mover.LabelKey: "demo"}}}}, // no action label
 		histSvc("h1", "demo", "onsite", "backup"),
 		histSvc("h2", "demo", "onsite", "backup"),
-	}} // tasks nil => every service is terminated (serviceRunning == false)
+	}, tasks: []swarm.Task{completeTask(0)}} // confirmed worker exit for each service
 	n, err := (&Engine{cli: f, poll: time.Millisecond}).Reap(context.Background(), 1)
 	if err != nil {
 		t.Fatalf("Reap: %v", err)

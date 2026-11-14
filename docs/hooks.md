@@ -234,3 +234,8 @@ Compose (no interpolation) use a single `$`.
   notifications include its ID when available; `sabon_backups_total` and the
   last-success timestamp describe the **whole lifecycle**, not just snapshot
   creation. Retained mover history describes the mover alone.
+- Swarm service removal is asynchronous and cannot prove worker termination.
+  Cancelled movers report a possible surviving worker and retain their service
+  identity, even when shutdown survival was not requested. Cancelled hooks also
+  retain their services. Missing task evidence and orphaned tasks block recovery;
+  this conservative behavior does not implement full distributed worker fencing.

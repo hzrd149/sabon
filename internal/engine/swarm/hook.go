@@ -12,6 +12,7 @@ package swarm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -28,16 +29,19 @@ var _ engine.Hooks = (*Hooks)(nil)
 
 // Hooks runs pre/post backup actions against a Swarm cluster.
 type Hooks struct {
-	cli  swarmClient
-	poll time.Duration // task-state poll interval
+	cli     swarmClient
+	poll    time.Duration // task-state poll interval
+	pending engine.HookTracker
 }
+
+func (h *Hooks) CheckHookCompletion(ctx context.Context) error { return h.pending.Check(ctx) }
 
 // NewHooks returns a swarm hook runner.
 func NewHooks(cli swarmClient) *Hooks { return &Hooks{cli: cli, poll: time.Second} }
 
 // RunOneShot spawns a one-shot service from spec.Image, waits for its task to
 // finish, and removes the service. Non-zero exit (with logs) is an error.
-func (h *Hooks) RunOneShot(ctx context.Context, spec engine.RunSpec) error {
+func (h *Hooks) RunOneShot(ctx context.Context, spec engine.RunSpec) (retErr error) {
 	if spec.Image == "" {
 		return fmt.Errorf("hook: run mode needs an image")
 	}
@@ -69,12 +73,35 @@ func (h *Hooks) RunOneShot(ctx context.Context, spec engine.RunSpec) error {
 	if err != nil {
 		return fmt.Errorf("create hook service: %w", err)
 	}
-	defer func() { _ = h.cli.ServiceRemove(context.WithoutCancel(ctx), created.ID) }()
-
 	code, err := h.wait(ctx, created.ID)
 	if err != nil {
-		return err
+		// Retain the service; removing it does not prove its worker exited.
+		h.pending.Add("swarm-service", created.ID, func(checkCtx context.Context) error {
+			tasks, err := h.cli.TaskList(checkCtx, swarm.TaskListOptions{Filters: filters.NewArgs(filters.Arg("service", created.ID))})
+			if err != nil {
+				return err
+			}
+			if len(tasks) == 0 {
+				return fmt.Errorf("no task termination evidence")
+			}
+			for _, tk := range tasks {
+				switch tk.Status.State {
+				case swarm.TaskStateComplete, swarm.TaskStateFailed, swarm.TaskStateRejected, swarm.TaskStateShutdown:
+				default:
+					return fmt.Errorf("task %s is %s", tk.ID, tk.Status.State)
+				}
+			}
+			return nil
+		})
+		return errors.Join(err, &engine.HookUncertain{Kind: "swarm-service", ID: created.ID, Err: err})
 	}
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if err := h.cli.ServiceRemove(cleanupCtx, created.ID); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("remove hook service %s: %w", created.ID, err))
+		}
+	}()
 	if code != 0 {
 		return fmt.Errorf("hook service %s exited with code %d:\n%s", spec.Image, code, h.serviceLogs(ctx, created.ID))
 	}
@@ -88,12 +115,12 @@ func (h *Hooks) wait(ctx context.Context, serviceID string) (int, error) {
 	defer t.Stop()
 	for {
 		tasks, err := h.cli.TaskList(ctx, swarm.TaskListOptions{Filters: filters.NewArgs(filters.Arg("service", serviceID))})
-		if err == nil {
+		if err == nil && tasksTerminated(tasks) {
 			for _, tk := range tasks {
 				switch tk.Status.State {
 				case swarm.TaskStateComplete:
 					return exitCode(tk), nil
-				case swarm.TaskStateFailed, swarm.TaskStateRejected, swarm.TaskStateShutdown, swarm.TaskStateOrphaned:
+				case swarm.TaskStateFailed, swarm.TaskStateRejected, swarm.TaskStateShutdown:
 					if c := exitCode(tk); c != 0 {
 						return c, nil
 					}
@@ -133,7 +160,7 @@ func (h *Hooks) running(ctx context.Context, serviceID string) bool {
 	if err != nil {
 		return true // fail safe: don't reap what we can't inspect
 	}
-	return anyRunning(tasks)
+	return !tasksTerminated(tasks)
 }
 
 // AppEnv returns the app service's environment as a KEY->VALUE map.
