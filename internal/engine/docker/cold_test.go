@@ -28,6 +28,8 @@ type coldClient struct {
 	aliases                               map[string]string
 	starts, stops                         int
 	startErr, stopErr, listErr, removeErr error
+	infoErr                               error
+	inspects                              int
 	beforeStop                            func()
 }
 
@@ -46,11 +48,12 @@ func (f *coldClient) put(id string, running bool, labels map[string]string) {
 	f.containers[id] = container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: id, State: &container.State{Running: running, Status: status}}, Config: &container.Config{Labels: labels}, Mounts: []container.MountPoint{{Type: mount.TypeVolume, Name: "data"}}}
 }
 func (f *coldClient) Info(context.Context) (system.Info, error) {
-	return system.Info{ID: "test-daemon"}, nil
+	return system.Info{ID: "test-daemon"}, f.infoErr
 }
 func (f *coldClient) ContainerInspect(_ context.Context, id string) (container.InspectResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.inspects++
 	if alias := f.aliases[id]; alias != "" {
 		id = alias
 	}
@@ -393,6 +396,50 @@ func TestColdRestartAcknowledgementLost(t *testing.T) {
 	}
 	if f.starts != 1 {
 		t.Fatal("already restored container started twice")
+	}
+}
+
+func TestColdPreflightFailuresDoNotTouchContainers(t *testing.T) {
+	for _, mode := range []string{"missing-state", "relative-state", "info-error"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newColdClient(true)
+			q := NewDurableQuiescer(f, t.TempDir())
+			switch mode {
+			case "missing-state":
+				q.stateDir = ""
+			case "relative-state":
+				q.stateDir = "relative"
+			case "info-error":
+				f.infoErr = errors.New("initial Info unavailable")
+			}
+			if err := q.PreflightCold(context.Background()); err == nil {
+				t.Fatal("preflight accepted invalid prerequisites")
+			}
+			if f.inspects != 0 || f.starts != 0 || f.stops != 0 {
+				t.Fatal("preflight touched containers")
+			}
+		})
+	}
+}
+
+func TestColdPreflightDoesNotRecoverAbandonedOperation(t *testing.T) {
+	f := newColdClient(true)
+	q := NewDurableQuiescer(f, t.TempDir())
+	l := acquireTestCold(t, q)
+	_ = l.lock.Close()
+	inspects := f.inspects
+	if err := q.PreflightCold(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if f.starts != 0 || f.stops != 1 || f.inspects != inspects {
+		t.Fatal("preflight attempted recovery")
+	}
+	records, err := readColdRecords(l.dir)
+	if err != nil || len(records) != 1 {
+		t.Fatalf("preflight changed recovery journal: %+v %v", records, err)
+	}
+	if _, err := q.RecoverQuiesced(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 

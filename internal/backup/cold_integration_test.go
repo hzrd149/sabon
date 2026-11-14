@@ -6,12 +6,14 @@ import (
 	"io"
 	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/davidborzek/sabon/api"
 	"github.com/davidborzek/sabon/internal/config"
 	"github.com/davidborzek/sabon/internal/discovery"
 	"github.com/davidborzek/sabon/internal/engine"
+	"github.com/davidborzek/sabon/internal/engine/docker"
 	"github.com/davidborzek/sabon/internal/mover"
 	"github.com/davidborzek/sabon/internal/snapshot"
 )
@@ -252,5 +254,80 @@ func TestColdLeaseBackupAndRestoreIntegration(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+type preflightQuiescer struct {
+	leaseQuiescer
+	failure                  error
+	preflights, acquisitions int
+}
+
+func (q *preflightQuiescer) PreflightCold(context.Context) error {
+	q.preflights++
+	return q.failure
+}
+
+func (q *preflightQuiescer) AcquireCold(ctx context.Context, ref string, sources []discovery.Source) (engine.ColdLease, error) {
+	q.acquisitions++
+	return q.leaseQuiescer.AcquireCold(ctx, ref, sources)
+}
+
+type preflightHooks struct {
+	engine.Hooks
+	calls int
+}
+
+func (h *preflightHooks) RunOneShot(context.Context, engine.RunSpec) error {
+	h.calls++
+	return nil
+}
+
+func TestColdPreflightFailureHasNoLifecycleSideEffects(t *testing.T) {
+	t.Setenv("RESTIC_PASSWORD", "test-only")
+	failure := errors.New("cold storage unavailable")
+	l := &testColdLease{}
+	q := &preflightQuiescer{leaseQuiescer: leaseQuiescer{lease: l}, failure: failure}
+	hooks := &preflightHooks{}
+	e := &coldTestEngine{lease: l}
+	o := New(&config.Config{Snapshot: "none"}, "test-image", e, hooks, q, fakeHost{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	job := discovery.Job{App: "app", Container: "container", Spec: api.Spec{
+		Stop:      true,
+		PreHooks:  []api.Hook{{Image: "fixture-hook", Command: []string{"pre"}}},
+		PostHooks: []api.Hook{{Image: "fixture-hook", Command: []string{"post"}}},
+	}}
+	_, err := o.RunTarget(context.Background(), job, api.Target{Name: "target", Path: "/test-repo"})
+	if !errors.Is(err, failure) {
+		t.Fatalf("lost preflight error: %v", err)
+	}
+	if q.preflights != 1 || q.acquisitions != 0 || hooks.calls != 0 || e.ran || l.attached || l.released {
+		t.Fatalf("preflight failure caused lifecycle work: preflights=%d acquisitions=%d hooks=%d mover=%v attached=%v released=%v", q.preflights, q.acquisitions, hooks.calls, e.ran, l.attached, l.released)
+	}
+}
+
+func TestColdStorageConfigurationFailsBeforeHooks(t *testing.T) {
+	for _, stateDir := range []string{"", "relative-state"} {
+		t.Run("state-dir="+stateDir, func(t *testing.T) {
+			o, job, target, e := lifecycleFixture(t)
+			job.Spec.Stop = true
+			// Invalid configuration must fail before any Docker API operation.
+			o.quiesce = docker.NewDurableQuiescer(nil, stateDir)
+			var hooks, movers int
+			o.hooks = lifecycleHooks{exec: func(context.Context, string) error {
+				hooks++
+				return nil
+			}}
+			e.run = func(context.Context, mover.Request) (mover.Result, bool, error) {
+				movers++
+				return mover.Result{}, false, nil
+			}
+			_, err := o.RunTarget(context.Background(), job, target)
+			if err == nil || !strings.Contains(err.Error(), "SABON_STATE_DIR") {
+				t.Fatalf("expected cold storage configuration error, got %v", err)
+			}
+			if hooks != 0 || movers != 0 {
+				t.Fatalf("configuration failure ran lifecycle work: hooks=%d movers=%d", hooks, movers)
+			}
+		})
 	}
 }

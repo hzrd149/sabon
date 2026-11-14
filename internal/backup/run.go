@@ -58,6 +58,15 @@ func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target 
 	if err := o.requireNoReaders(ctx, job.App, job.Container); err != nil {
 		return mover.Result{}, err
 	}
+	// Reject cold-storage configuration failures before hooks can change state
+	// and before recovery is armed. Acquisition still validates ownership later.
+	if job.Spec.Stop {
+		if preflight, ok := o.quiesce.(engine.ColdPreflighter); ok {
+			if err := preflight.PreflightCold(ctx); err != nil {
+				return mover.Result{}, err
+			}
+		}
+	}
 
 	// Arm recovery before invoking a pre-hook or stop: either can change state
 	// and then fail. Post-hooks must tolerate incomplete preparation.

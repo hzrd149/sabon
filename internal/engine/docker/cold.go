@@ -23,6 +23,7 @@ import (
 )
 
 var _ engine.ColdAcquirer = (*Quiescer)(nil)
+var _ engine.ColdPreflighter = (*Quiescer)(nil)
 var _ engine.Recoverer = (*Quiescer)(nil)
 
 type coldRecord struct {
@@ -43,6 +44,13 @@ type coldLease struct {
 	mu       sync.Mutex
 	released bool
 	result   error
+}
+
+// PreflightCold checks durable storage and daemon identity without touching
+// containers or recovering existing operations. AcquireCold validates again.
+func (q *Quiescer) PreflightCold(ctx context.Context) error {
+	_, err := q.coldDir(ctx)
+	return err
 }
 
 // coldDir deliberately has no ephemeral fallback. Daemon identity, rather than
