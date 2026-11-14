@@ -63,6 +63,12 @@ type Quiescer interface {
 	Start(ctx context.Context, ref string) error
 }
 
+// ColdPreflighter optionally validates cold-operation prerequisites before hooks
+// can change application state. It must not recover, stop, or start containers.
+type ColdPreflighter interface {
+	PreflightCold(context.Context) error
+}
+
 // ColdAcquirer optionally provides durable, cross-process cold ownership.
 // AcquireCold errors can leave a durable recovery obligation even though no
 // lease is returned. Callers must never compensate with Quiescer.Start.

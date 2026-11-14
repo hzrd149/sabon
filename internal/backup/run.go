@@ -52,6 +52,13 @@ func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target 
 	log := o.log.With("app", job.App, "target", target.Name)
 
 	// Pre-hooks (e.g. pg_dump), then optional cold-backup stop.
+	if job.Spec.Stop {
+		if preflight, ok := o.quiesce.(engine.ColdPreflighter); ok {
+			if err := preflight.PreflightCold(ctx); err != nil {
+				return mover.Result{}, err
+			}
+		}
+	}
 	if err := o.runHooks(ctx, job, job.Spec.PreHooks, "pre", log); err != nil {
 		return mover.Result{}, err
 	}
