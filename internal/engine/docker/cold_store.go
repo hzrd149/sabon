@@ -51,7 +51,7 @@ func syncColdDir(dir string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	return f.Sync()
 }
 
@@ -64,7 +64,7 @@ func writeColdRecord(dir string, r *coldRecord) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(f.Name())
+	defer func() { _ = os.Remove(f.Name()) }()
 	if _, err = f.Write(b); err != nil {
 		_ = f.Close()
 		return err

@@ -18,7 +18,7 @@ func runRecover(ctx context.Context, _ *cli.Command) error {
 	if err != nil {
 		return err
 	}
-	defer cli.Close()
+	defer func() { _ = cli.Close() }()
 	rt, err := newRuntime(ctx, cli, cfg, logger)
 	if err != nil {
 		return err
