@@ -302,6 +302,11 @@ func (q *Quiescer) recoverCold(ctx context.Context, dir string, r *coldRecord) e
 	// Bound fresh cleanup contexts supplied by orchestrators.
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	for _, checker := range q.hookCheckers {
+		if err := checker.CheckHookCompletion(ctx); err != nil {
+			return fmt.Errorf("cold recovery deferred until hook exit: %w", err)
+		}
+	}
 	if err := q.coldMoverIdle(ctx, r); err != nil {
 		return err
 	}

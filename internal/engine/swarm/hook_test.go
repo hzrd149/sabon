@@ -58,7 +58,7 @@ func TestSwarmHooksRunOneShotFailure(t *testing.T) {
 }
 
 func TestSwarmHooksReap(t *testing.T) {
-	f := &fakeSwarm{services: []swarm.Service{{ID: "h1"}}, tasks: nil} // no running task => finished
+	f := &fakeSwarm{services: []swarm.Service{{ID: "h1"}}, tasks: []swarm.Task{completeTask(0)}}
 	n, err := testHooks(f).Reap(context.Background())
 	if err != nil {
 		t.Fatalf("Reap: %v", err)

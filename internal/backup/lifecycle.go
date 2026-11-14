@@ -7,7 +7,17 @@ import (
 	"time"
 
 	"github.com/davidborzek/sabon/internal/discovery"
+	"github.com/davidborzek/sabon/internal/engine"
 )
+
+func (o *Orchestrator) requireHookCompletion(ctx context.Context) error {
+	if checker, ok := o.hooks.(engine.HookCompletionChecker); ok {
+		if err := checker.CheckHookCompletion(ctx); err != nil {
+			return fmt.Errorf("source mutation deferred until hook exit: %w", err)
+		}
+	}
+	return nil
+}
 
 func lifecycleKey(app, source string) string {
 	if source != "" {

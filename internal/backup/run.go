@@ -55,6 +55,9 @@ func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target 
 	}
 
 	log := o.log.With("app", job.App, "target", target.Name)
+	if err := o.requireHookCompletion(ctx); err != nil {
+		return mover.Result{}, err
+	}
 	if err := o.requireNoReaders(ctx, job.App, job.Container); err != nil {
 		return mover.Result{}, err
 	}
@@ -75,9 +78,13 @@ func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target 
 	acquireFailed := false
 	var snapCleanup func(context.Context)
 	defer func() {
+		checkCtx, cancel := cleanupContext(ctx)
+		hookErr := o.requireHookCompletion(checkCtx)
+		cancel()
+		retErr = errors.Join(retErr, hookErr)
 		// Check before destroying snapshots or hook artifacts, including failures
 		// before RunMover. Release must still drop process ownership on every path.
-		if cold != nil {
+		if cold != nil && hookErr == nil {
 			checkCtx, cancel := cleanupContext(ctx)
 			if err := cold.CheckIdle(checkCtx); err != nil {
 				keptMover = true
@@ -85,8 +92,10 @@ func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target 
 			}
 			cancel()
 		}
-		if keptMover || acquireFailed {
+		if keptMover || acquireFailed || hookErr != nil {
 			if cold != nil {
+				// The durable runtime also fences recovery on hook completion;
+				// Release drops ownership while retaining an unsafe obligation.
 				cleanupCtx, cancel := cleanupContext(ctx)
 				retErr = errors.Join(retErr, cold.Release(cleanupCtx))
 				cancel()
@@ -302,6 +311,9 @@ func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discover
 			return err
 		}
 		defer releaseApp()
+		if err := o.requireHookCompletion(ctx); err != nil {
+			return err
+		}
 		if err := o.requireNoReaders(ctx, app, sourceContainer(job)); err != nil {
 			return err
 		}

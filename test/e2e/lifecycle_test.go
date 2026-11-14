@@ -5,6 +5,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 	"github.com/davidborzek/sabon/internal/backup"
 	"github.com/davidborzek/sabon/internal/config"
 	"github.com/davidborzek/sabon/internal/discovery"
+	"github.com/davidborzek/sabon/internal/engine"
 	dockerengine "github.com/davidborzek/sabon/internal/engine/docker"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
@@ -59,7 +61,7 @@ func TestDockerHookLifecycle(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = cli.Close() })
 	t.Setenv("SABON_E2E_LIFECYCLE_PASSWORD", "synthetic-test-password")
-	for _, phase := range []string{"pre", "post"} {
+	for _, phase := range []string{"pre", "post", "pre-timeout", "post-timeout"} {
 		t.Run(phase, func(t *testing.T) {
 			name := unique + "-" + phase
 			source, cache := name+"-data", name+"-cache"
@@ -95,14 +97,63 @@ func TestDockerHookLifecycle(t *testing.T) {
 				PreHooks:  []api.Hook{{Command: []string{"sh", "-c", pre}}},
 				PostHooks: []api.Hook{{Command: []string{"sh", "-c", post}}, {Command: []string{"sh", "-c", "touch /data/later-cleanup"}}},
 			}}
+			if strings.HasSuffix(phase, "-timeout") {
+				writer := api.Hook{Timeout: "1s", Command: []string{"sh", "-c", "while [ ! -e /data/finish-writer ]; do echo writing >>/data/writes; sleep 0.1; done; touch /data/writer-exited"}}
+				job.Spec.PostHooks[0] = api.Hook{Command: []string{"sh", "-c", "rm -f /data/prepared; touch /data/cleaned"}}
+				if phase == "pre-timeout" {
+					job.Spec.PreHooks[0] = writer
+				} else {
+					job.Spec.PostHooks[0] = writer
+				}
+			}
 			// Repository is inside the unique cache volume: no client-host bind
 			// path assumptions, so the test also works against an isolated DinD.
 			target := api.Target{Name: "test", Repo: "/cache/repository", PasswordEnv: "SABON_E2E_LIFECYCLE_PASSWORD"}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
 			res, err := o.RunTarget(ctx, job, target)
-			if err == nil || !strings.Contains(err.Error(), phase+"-hook") {
+			if err == nil || !strings.Contains(err.Error(), strings.TrimSuffix(phase, "-timeout")+"-hook") {
 				t.Fatalf("missing real hook failure: result=%+v err=%v", res, err)
+			}
+			if strings.HasSuffix(phase, "-timeout") {
+				var uncertain *engine.HookUncertain
+				if !errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &uncertain) || uncertain.ID == "" {
+					t.Fatalf("lost timeout/exec identity: %v", err)
+				}
+				// Prove the real exec still writes after the deadline, and that
+				// neither recovery nor the next target can mutate its artifacts.
+				mustDocker(t, "exec", id, "sh", "-c", "before=$(wc -l </data/writes); sleep 0.3; after=$(wc -l </data/writes); test \"$after\" -gt \"$before\" && test ! -e /data/cleaned && test ! -e /data/later-cleanup")
+				if phase == "pre-timeout" && res.SnapshotID != "" {
+					t.Fatal("backup ran after uncertain prehook")
+				}
+				if phase == "post-timeout" && res.SnapshotID == "" {
+					t.Fatal("missing snapshot before uncertain recovery")
+				}
+				retry := job
+				retry.Spec.PreHooks = []api.Hook{{Command: []string{"sh", "-c", "touch /data/next-pre"}}}
+				retry.Spec.PostHooks = []api.Hook{{Command: []string{"sh", "-c", "touch /data/cleaned"}}}
+				nextTarget := target
+				nextTarget.Name = "second-target"
+				if _, err := o.RunTarget(ctx, retry, nextTarget); err == nil {
+					t.Fatal("next target ran while exec still writes")
+				}
+				mustDocker(t, "exec", id, "sh", "-c", "test ! -e /data/next-pre")
+				mustDocker(t, "exec", id, "touch", "/data/finish-writer")
+				waitCtx, waitCancel := context.WithTimeout(ctx, 10*time.Second)
+				defer waitCancel()
+				for hooks.CheckHookCompletion(waitCtx) != nil {
+					select {
+					case <-waitCtx.Done():
+						t.Fatal("writer exit was not confirmed")
+					case <-time.After(50 * time.Millisecond):
+					}
+				}
+				mustDocker(t, "exec", id, "test", "-e", "/data/writer-exited")
+				if _, err := o.RunTarget(ctx, retry, nextTarget); err != nil {
+					t.Fatalf("confirmed hook exit did not unblock backup: %v", err)
+				}
+				mustDocker(t, "exec", id, "sh", "-c", "test -e /data/next-pre && test -e /data/cleaned")
+				return
 			}
 			mustDocker(t, "exec", id, "sh", "-c", "test ! -e /data/prepared && test -e /data/cleaned && test -e /data/later-cleanup")
 			runs, listErr := eng.ListRuns(ctx, name, "")

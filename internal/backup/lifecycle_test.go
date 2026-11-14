@@ -467,3 +467,61 @@ func TestSurvivingNamedSpecBlocksSharedSource(t *testing.T) {
 		t.Fatal("restore ignored sibling spec")
 	}
 }
+
+type pendingLifecycleHooks struct {
+	lifecycleHooks
+	pending engine.HookTracker
+}
+
+func (h *pendingLifecycleHooks) CheckHookCompletion(ctx context.Context) error {
+	return h.pending.Check(ctx)
+}
+
+func TestUncertainHookBlocksCleanupAndNewPreparation(t *testing.T) {
+	for _, phase := range []string{"pre", "post"} {
+		t.Run(phase, func(t *testing.T) {
+			o, job, target, _ := lifecycleFixture(t)
+			h := &pendingLifecycleHooks{}
+			running, first := true, true
+			var calls []string
+			h.exec = func(_ context.Context, cmd string) error {
+				calls = append(calls, cmd)
+				if cmd == phase && first {
+					first = false
+					h.pending.Add("synthetic-exec", "writer", func(context.Context) error {
+						if running {
+							return errors.New("writer running")
+						}
+						return nil
+					})
+					return errors.Join(context.DeadlineExceeded, h.CheckHookCompletion(context.Background()))
+				}
+				return nil
+			}
+			o.hooks = h
+			_, err := o.RunTarget(context.Background(), job, target)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("lost timeout: %v", err)
+			}
+			want := []string{"pre"}
+			if phase == "post" {
+				want = append(want, "post")
+			}
+			if !reflect.DeepEqual(calls, want) {
+				t.Fatalf("cleanup ran alongside writer: %v", calls)
+			}
+			other := job
+			other.App = "another-spec"
+			if _, err := o.RunTarget(context.Background(), other, target); err == nil {
+				t.Fatal("new preparation not fenced")
+			}
+			if !reflect.DeepEqual(calls, want) {
+				t.Fatal("blocked run executed hooks")
+			}
+			running = false
+			if _, err := o.RunTarget(context.Background(), other, target); err != nil {
+				t.Fatalf("confirmed exit did not release fence: %v", err)
+			}
+		})
+	}
+}

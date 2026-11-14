@@ -331,3 +331,77 @@ func TestColdStorageConfigurationFailsBeforeHooks(t *testing.T) {
 		})
 	}
 }
+
+func TestColdLifecycleHookUncertainty(t *testing.T) {
+	for _, phase := range []string{"pre", "mover", "post"} {
+		t.Run(phase, func(t *testing.T) {
+			o, job, target, e := lifecycleFixture(t)
+			job.Spec.Stop = true
+			job.Spec.Snapshot = "zfs"
+			job.Sources = binds("data")
+			h := &pendingLifecycleHooks{}
+			o.hooks = h
+			failure := errors.New("hook still writing")
+			markUncertain := func() error {
+				h.pending.Add("synthetic-exec", "writer", func(context.Context) error { return failure })
+				return h.CheckHookCompletion(context.Background())
+			}
+			var calls []string
+			l := &testColdLease{}
+			l.onRelease = func(ctx context.Context) {
+				calls = append(calls, "release")
+				// Model the standalone runtime's shared recovery fence.
+				l.releaseErr = h.CheckHookCompletion(ctx)
+				if l.releaseErr == nil {
+					calls = append(calls, "restart")
+				}
+			}
+			q := &preflightQuiescer{leaseQuiescer: leaseQuiescer{lease: l}}
+			o.quiesce = q
+			o.snaps = []snapshot.Snapshotter{lifecycleSnapshot{fakeSnap: &fakeSnap{mode: "zfs", onFS: map[string]bool{"data": true}}, cleanup: func(context.Context) {
+				calls = append(calls, "cleanup")
+			}}}
+			h.exec = func(_ context.Context, cmd string) error {
+				calls = append(calls, cmd)
+				if cmd == phase {
+					return markUncertain()
+				}
+				return nil
+			}
+			e.run = func(context.Context, mover.Request) (mover.Result, bool, error) {
+				calls = append(calls, "mover")
+				if phase == "mover" {
+					_ = markUncertain()
+				}
+				return mover.Result{}, false, nil
+			}
+			_, err := o.RunTarget(context.Background(), job, target)
+			var uncertain *engine.HookUncertain
+			if !errors.As(err, &uncertain) || !errors.Is(err, failure) {
+				t.Fatalf("lost hook uncertainty: %v", err)
+			}
+			want := []string{"pre"}
+			switch phase {
+			case "mover":
+				want = append(want, "mover", "release")
+			case "post":
+				want = append(want, "mover", "cleanup", "release", "restart", "post")
+			}
+			if !reflect.DeepEqual(calls, want) || l.released != (phase != "pre") {
+				t.Fatalf("calls=%v want=%v released=%v", calls, want, l.released)
+			}
+			preflights, acquisitions := q.preflights, q.acquisitions
+			// Both backup preparation and in-place restore remain fenced. These
+			// attempts must not reach preflight, acquisition, hooks, or a mover.
+			if _, err := o.RunTarget(context.Background(), job, target); !errors.Is(err, failure) {
+				t.Fatalf("new backup bypassed hook uncertainty: %v", err)
+			}
+			if err := o.RunRestore(context.Background(), job.App, &job, target, RestoreOptions{Stop: true}, io.Discard); !errors.Is(err, failure) {
+				t.Fatalf("restore bypassed hook uncertainty: %v", err)
+			}
+			if !reflect.DeepEqual(calls, want) || q.preflights != preflights || q.acquisitions != acquisitions {
+				t.Fatalf("uncertain hook permitted preparation: calls=%v", calls)
+			}
+		})
+	}
+}

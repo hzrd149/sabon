@@ -7,10 +7,13 @@ package docker
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/davidborzek/sabon/internal/engine"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
@@ -25,15 +28,18 @@ var _ engine.Execer = (*Hooks)(nil)
 
 // Hooks executes hooks against the Docker engine.
 type Hooks struct {
-	cli client.APIClient
+	cli     client.APIClient
+	pending engine.HookTracker
 }
+
+func (r *Hooks) CheckHookCompletion(ctx context.Context) error { return r.pending.Check(ctx) }
 
 // NewHooks returns a Docker hook runner.
 func NewHooks(cli client.APIClient) *Hooks { return &Hooks{cli: cli} }
 
 // Exec runs a command inside an existing container (exec mode) and returns an
 // error, with captured output, if it cannot start or exits non-zero.
-func (r *Hooks) Exec(ctx context.Context, containerID string, cmd, env []string, user string) error {
+func (r *Hooks) Exec(ctx context.Context, containerID string, cmd, env []string, user string) (retErr error) {
 	if len(cmd) == 0 {
 		return fmt.Errorf("hook: empty command")
 	}
@@ -47,6 +53,29 @@ func (r *Hooks) Exec(ctx context.Context, containerID string, cmd, env []string,
 	if err != nil {
 		return fmt.Errorf("exec create in %s: %w", containerID, err)
 	}
+	defer func() {
+		r.pending.Add("docker-exec", create.ID, func(checkCtx context.Context) error {
+			insp, err := r.cli.ContainerExecInspect(checkCtx, create.ID)
+			// Running=false with PID=0 may be an exec whose asynchronous start
+			// has not happened yet (e.g. an interrupted attach), not an exit.
+			if err == nil && !insp.Running && insp.Pid > 0 {
+				return nil
+			}
+			// A removed/stopped source proves its exec cannot still write. An
+			// unavailable exec record alone does not establish termination.
+			source, sourceErr := r.cli.ContainerInspect(checkCtx, containerID)
+			if cerrdefs.IsNotFound(sourceErr) || (sourceErr == nil && source.State != nil && !source.State.Running && (source.State.Status == "exited" || source.State.Status == "dead")) {
+				return nil
+			}
+			if err != nil {
+				return errors.Join(err, sourceErr)
+			}
+			return errors.Join(fmt.Errorf("exec termination not confirmed in container %s", containerID), sourceErr)
+		})
+		checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		retErr = errors.Join(retErr, r.CheckHookCompletion(checkCtx))
+	}()
 	att, err := r.cli.ContainerExecAttach(ctx, create.ID, container.ExecAttachOptions{})
 	if err != nil {
 		return fmt.Errorf("exec attach in %s: %w", containerID, err)
@@ -88,7 +117,7 @@ func (r *Hooks) Exec(ctx context.Context, containerID string, cmd, env []string,
 
 // RunOneShot spawns a fresh container from spec.Image, runs the command, waits
 // for it, and removes it. Non-zero exit (with logs) is an error.
-func (r *Hooks) RunOneShot(ctx context.Context, spec engine.RunSpec) error {
+func (r *Hooks) RunOneShot(ctx context.Context, spec engine.RunSpec) (retErr error) {
 	if spec.Image == "" {
 		return fmt.Errorf("hook: run mode needs an image")
 	}
@@ -118,7 +147,27 @@ func (r *Hooks) RunOneShot(ctx context.Context, spec engine.RunSpec) error {
 	}
 	id := created.ID
 	defer func() {
-		_ = r.cli.ContainerRemove(context.WithoutCancel(ctx), id, container.RemoveOptions{Force: true})
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if err := r.cli.ContainerRemove(cleanupCtx, id, container.RemoveOptions{Force: true}); err != nil && !cerrdefs.IsNotFound(err) {
+			retErr = errors.Join(retErr, fmt.Errorf("remove hook container %s: %w", id, err))
+			r.pending.Add("docker-container", id, func(checkCtx context.Context) error {
+				insp, err := r.cli.ContainerInspect(checkCtx, id)
+				if cerrdefs.IsNotFound(err) {
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+				if insp.State != nil && !insp.State.Running && (insp.State.Status == "exited" || insp.State.Status == "dead") {
+					return nil
+				}
+				return fmt.Errorf("container not confirmed stopped")
+			})
+			checkCtx, checkCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer checkCancel()
+			retErr = errors.Join(retErr, r.CheckHookCompletion(checkCtx))
+		}
 	}()
 
 	if err := r.cli.ContainerStart(ctx, id, container.StartOptions{}); err != nil {
@@ -131,6 +180,9 @@ func (r *Hooks) RunOneShot(ctx context.Context, spec engine.RunSpec) error {
 	case err := <-errCh:
 		return fmt.Errorf("wait hook container: %w", err)
 	case st := <-statusCh:
+		if st.Error != nil {
+			return fmt.Errorf("wait hook container: %s", st.Error.Message)
+		}
 		if st.StatusCode != 0 {
 			return fmt.Errorf("hook container %s exited with code %d:\n%s", spec.Image, st.StatusCode, r.logs(ctx, id))
 		}

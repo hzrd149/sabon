@@ -14,6 +14,7 @@ import (
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/davidborzek/sabon/internal/discovery"
+	"github.com/davidborzek/sabon/internal/engine"
 	"github.com/davidborzek/sabon/internal/mover"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
@@ -172,6 +173,54 @@ func TestColdOriginalStateAndWriteAhead(t *testing.T) {
 				t.Fatalf("repeat recovery: %d %v", n, err)
 			}
 		})
+	}
+}
+
+type coldHookChecker struct{ engine.HookTracker }
+
+func (h *coldHookChecker) CheckHookCompletion(ctx context.Context) error {
+	return h.Check(ctx)
+}
+
+func TestColdReleaseAndRecoveryWaitForUncertainHooks(t *testing.T) {
+	f := newColdClient(true)
+	hooks := &coldHookChecker{}
+	q := NewDurableQuiescer(f, t.TempDir(), hooks)
+	l := acquireTestCold(t, q)
+	req := mover.Request{}
+	if err := l.AttachMover(context.Background(), &req); err != nil {
+		t.Fatal(err)
+	}
+	// A concurrent hook becomes uncertain while this operation holds its lease.
+	failure := errors.New("hook still writing")
+	running := true
+	hooks.Add("synthetic-exec", "writer", func(context.Context) error {
+		if running {
+			return failure
+		}
+		return nil
+	})
+	if err := l.Release(context.Background()); !errors.Is(err, failure) {
+		t.Fatalf("release ignored hook uncertainty: %v", err)
+	}
+	if f.starts != 0 {
+		t.Fatal("release restarted an app with an uncertain writer")
+	}
+	// An error (rather than a skipped live owner) proves Release unlocked the
+	// operation and the periodic recovery path independently checks hooks.
+	if n, err := q.RecoverQuiesced(context.Background()); n != 0 || !errors.Is(err, failure) {
+		t.Fatalf("recovery bypassed hook fence or ownership leaked: n=%d err=%v", n, err)
+	}
+	records, err := readColdRecords(l.dir)
+	if err != nil || len(records) != 1 || f.starts != 0 {
+		t.Fatalf("durable obligation lost: records=%v starts=%d err=%v", records, f.starts, err)
+	}
+	running = false
+	if n, err := q.RecoverQuiesced(context.Background()); n != 1 || err != nil {
+		t.Fatalf("recovery after hook exit: n=%d err=%v", n, err)
+	}
+	if f.starts != 1 {
+		t.Fatalf("original running state not restored: starts=%d", f.starts)
 	}
 }
 

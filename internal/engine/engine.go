@@ -35,7 +35,8 @@ type RunInfo struct {
 // mover is a plain container (standalone) or a one-shot service (Swarm).
 type Engine interface {
 	// RunMover creates, runs and waits for one mover, returning its result. The
-	// bool reports whether the mover was intentionally left running (shutdown).
+	// bool reports whether a mover may still be running. Callers must defer
+	// destructive recovery when true, including uncertain worker termination.
 	RunMover(ctx context.Context, req mover.Request) (mover.Result, bool, error)
 	// Reap trims exited movers, keeping the newest `keep` per app/target/action
 	// as run history. Running movers are spared.

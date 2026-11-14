@@ -223,8 +223,9 @@ func newRuntime(ctx context.Context, cli client.APIClient, cfg *config.Config, l
 	default:
 		rt.eng = docker.New(cli)
 		rt.disc = docker.NewDiscoverer(cli, cfg.LabelPrefix, cfg.WatchByDefault, cfg.CacheVolume, cfg.Instance, log)
-		rt.quiesce = docker.NewDurableQuiescer(cli, cfg.StateDir)
-		rt.hooks = docker.NewHooks(cli)
+		hooks := docker.NewHooks(cli)
+		rt.quiesce = docker.NewDurableQuiescer(cli, cfg.StateDir, hooks)
+		rt.hooks = hooks
 		rt.host = docker.NewHost(cli)
 		// The ZFS snapshotter is a standalone-Docker capability (a privileged
 		// local container); only the docker runtime provides it.

@@ -17,10 +17,19 @@ func (o *Orchestrator) runPostHooks(ctx context.Context, job discovery.Job, log 
 	var errs []error
 	for i, h := range job.Spec.PostHooks {
 		postCtx, cancel := cleanupContext(ctx)
+		if err := o.requireHookCompletion(postCtx); err != nil {
+			cancel()
+			errs = append(errs, err)
+			break
+		}
 		err := o.runOneHook(postCtx, job, h, "post", i, log)
 		cancel()
 		if err != nil {
 			errs = append(errs, err)
+			var uncertain *engine.HookUncertain
+			if errors.As(err, &uncertain) {
+				break
+			}
 		}
 	}
 	return errors.Join(errs...)

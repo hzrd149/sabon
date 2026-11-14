@@ -193,10 +193,26 @@ Compose (no interpolation) use a single `$`.
   them idempotent and safe when preparation completed only partially. A failing
   pre-hook blocks the mover and all remaining pre-hooks.
 - Every post-hook is attempted in configured order, even if an earlier cleanup
-  fails. Each gets a fresh five-minute budget independent of backup cancellation
+  fails **with confirmed termination**. Each gets a fresh five-minute budget independent of backup cancellation
   (a shorter hook `timeout` still applies). Cold restart is attempted before
   post-hooks so exec-mode cleanup can run inside the application; restart has its
   own five-minute budget. Context deadlines require runtime cooperation.
+- Docker exec cancellation closes the client stream; it does **not** kill the
+  command. When termination is uncertain, sabon retains the exec/container ID,
+  reports a typed uncertainty error, and skips recovery that could change its
+  sources. Uncertain post-hooks block all later cleanup hooks. Before new
+  preparation or recovery, the runtime checks pending identities for confirmed
+  exit. A failed forced removal is reported, and a still-running hook container
+  also blocks progress. Checks are conservative across sources within that
+  runtime instance. Standalone cold leases still release process ownership when
+  a hook is uncertain, but retain their durable recovery obligation; periodic
+  recovery in the same runtime also waits for confirmed hook exit before restart.
+  Use foreground hooks; deliberately detached child processes
+  are outside the exec-completion contract.
+- Pending hook identities are **process-local**. This is not crash/restart
+  fencing: after restarting sabon, confirm old hooks have exited before running
+  new backups. No durable hook replay or tracking is provided here. Deferred
+  cleanup requires operator recovery; a later run does not replay old hooks.
 - Backup lifecycles for the same source container are serialized across named
   app specs and targets in one sabon
   process, including the entire pre-hook/mover/cleanup sequence. This prevents a
@@ -221,3 +237,8 @@ Compose (no interpolation) use a single `$`.
   notifications include its ID when available; `sabon_backups_total` and the
   last-success timestamp describe the **whole lifecycle**, not just snapshot
   creation. Retained mover history describes the mover alone.
+- Swarm service removal is asynchronous and cannot prove worker termination.
+  Cancelled movers report a possible surviving worker and retain their service
+  identity, even when shutdown survival was not requested. Cancelled hooks also
+  retain their services. Missing task evidence and orphaned tasks block recovery;
+  this conservative behavior does not implement full distributed worker fencing.

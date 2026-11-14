@@ -91,13 +91,13 @@ func (s *Engine) RunMover(ctx context.Context, req mover.Request) (mover.Result,
 		_ = s.cli.ServiceRemove(context.WithoutCancel(ctx), id)
 	}()
 
-	code, waitErr := s.wait(ctx, id, req.KeepOnShutdown, &keep)
+	code, waitErr := s.wait(ctx, id, &keep)
 	if waitErr != nil {
 		return mover.Result{}, keep, waitErr
 	}
 	// The task reached a terminal state; retain a terminated mover as run
-	// history if asked (reap trims per group). An ephemeral read mover, or one
-	// still running after a timeout/cancel, is removed by the defer.
+	// history if asked (reap trims per group). Only confirmed-terminal ephemeral
+	// movers are removed by the defer; uncertain workers retain their identity.
 	if req.Retain {
 		keep = true
 	}
@@ -124,27 +124,28 @@ func (s *Engine) RunMover(ctx context.Context, req mover.Request) (mover.Result,
 }
 
 // wait polls the service's task until it reaches a terminal state, returning its
-// exit code. On ctx cancel it honours KeepOnShutdown (sets *keep).
-func (s *Engine) wait(ctx context.Context, serviceID string, keepOnShutdown bool, keep *bool) (int, error) {
+// exit code. On cancellation it retains identity and sets *keep: asynchronous
+// service removal cannot prove that a worker exited, regardless of policy.
+func (s *Engine) wait(ctx context.Context, serviceID string, keep *bool) (int, error) {
 	t := time.NewTicker(s.poll)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			if context.Cause(ctx) != context.DeadlineExceeded && keepOnShutdown {
-				*keep = true
-			}
+			// Service removal is asynchronous, not proof of worker termination.
+			// Keep its identity observable until termination can be confirmed.
+			*keep = true
 			return 0, context.Cause(ctx)
 		case <-t.C:
 			tasks, err := s.cli.TaskList(ctx, swarm.TaskListOptions{Filters: filters.NewArgs(filters.Arg("service", serviceID))})
-			if err != nil {
+			if err != nil || !tasksTerminated(tasks) {
 				continue
 			}
 			for _, tk := range tasks {
 				switch tk.Status.State {
 				case swarm.TaskStateComplete:
 					return exitCode(tk), nil
-				case swarm.TaskStateFailed, swarm.TaskStateRejected, swarm.TaskStateShutdown, swarm.TaskStateOrphaned:
+				case swarm.TaskStateFailed, swarm.TaskStateRejected, swarm.TaskStateShutdown:
 					c := exitCode(tk)
 					if c == 0 {
 						c = 1 // terminal-but-not-complete without a code is still a failure
@@ -289,14 +290,22 @@ func (s *Engine) serviceRunning(ctx context.Context, serviceID string) bool {
 	if err != nil {
 		return true // fail safe: don't reap what we can't inspect
 	}
+	return !tasksTerminated(tasks)
+}
+
+// Empty/orphaned task history is not evidence that a worker stopped.
+func tasksTerminated(tasks []swarm.Task) bool {
+	if len(tasks) == 0 {
+		return false
+	}
 	for _, tk := range tasks {
 		switch tk.Status.State {
-		case swarm.TaskStateComplete, swarm.TaskStateFailed, swarm.TaskStateRejected, swarm.TaskStateShutdown, swarm.TaskStateOrphaned:
+		case swarm.TaskStateComplete, swarm.TaskStateFailed, swarm.TaskStateRejected, swarm.TaskStateShutdown:
 		default:
-			return true
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func (s *Engine) runInfo(ctx context.Context, svc swarm.Service) engine.RunInfo {
@@ -304,7 +313,7 @@ func (s *Engine) runInfo(ctx context.Context, svc swarm.Service) engine.RunInfo 
 	ri := engine.RunInfo{ID: svc.ID, App: l[mover.LabelApp], Target: l[mover.LabelTarget], Action: l[mover.LabelAction], Status: "running"}
 	ri.SourceContainer = l[mover.LabelSourceContainer]
 	tasks, err := s.cli.TaskList(ctx, swarm.TaskListOptions{Filters: filters.NewArgs(filters.Arg("service", svc.ID))})
-	if err != nil || len(tasks) == 0 {
+	if err != nil || !tasksTerminated(tasks) {
 		return ri
 	}
 	tk := tasks[0]
@@ -318,7 +327,7 @@ func (s *Engine) runInfo(ctx context.Context, svc swarm.Service) engine.RunInfo 
 	switch tk.Status.State {
 	case swarm.TaskStateComplete:
 		ri.Status, ri.FinishedAt = "succeeded", tk.Status.Timestamp
-	case swarm.TaskStateFailed, swarm.TaskStateRejected, swarm.TaskStateShutdown, swarm.TaskStateOrphaned:
+	case swarm.TaskStateFailed, swarm.TaskStateRejected, swarm.TaskStateShutdown:
 		ri.Status, ri.FinishedAt = "failed", tk.Status.Timestamp
 		if ri.ExitCode == 0 {
 			ri.ExitCode = 1
