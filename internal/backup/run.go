@@ -2,17 +2,23 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/davidborzek/sabon/api"
 	"github.com/davidborzek/sabon/internal/discovery"
 	"github.com/davidborzek/sabon/internal/mover"
 )
 
-// RunTarget backs one app up to one target and returns the mover's result.
-func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target api.Target) (mover.Result, error) {
+// RunTarget returns snapshot statistics independently of the overall lifecycle
+// error. A created snapshot does not imply successful application recovery.
+func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target api.Target) (res mover.Result, retErr error) {
+	releaseApp, err := o.lifecycles.lock(ctx, lifecycleKey(job.App, job.Container))
+	if err != nil {
+		return mover.Result{}, err
+	}
+	defer releaseApp()
 	// Per-target source view: drop volumes/paths this target excludes.
 	job.Sources = o.sourcesForTarget(job, target)
 	// Serialise runs against the same repository (target+app).
@@ -48,45 +54,54 @@ func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target 
 	}
 
 	log := o.log.With("app", job.App, "target", target.Name)
+	if err := o.requireNoReaders(ctx, job.App, job.Container); err != nil {
+		return mover.Result{}, err
+	}
+
+	// Arm recovery before invoking a pre-hook or stop: either can change state
+	// and then fail. Post-hooks must tolerate incomplete preparation.
+	stopAttempted, keptMover := false, false
+	var snapCleanup func(context.Context)
+	defer func() {
+		if keptMover {
+			retErr = errors.Join(retErr, fmt.Errorf("recovery deferred: mover may still be reading sources; snapshots and hook artifacts retained; verify mover exit and recover the app manually"))
+			return
+		}
+		if snapCleanup != nil {
+			cleanupCtx, cancel := cleanupContext(ctx)
+			snapCleanup(cleanupCtx)
+			cancel()
+		}
+		if stopAttempted {
+			cleanupCtx, cancel := cleanupContext(ctx)
+			if err := o.quiesce.Start(cleanupCtx, job.Container); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("restart after backup: %w", err))
+			}
+			cancel()
+		}
+		// Restart first: exec-mode cleanup needs a running application.
+		retErr = errors.Join(retErr, o.runPostHooks(ctx, job, log))
+	}()
 
 	// Pre-hooks (e.g. pg_dump), then optional cold-backup stop.
 	if err := o.runHooks(ctx, job, job.Spec.PreHooks, "pre", log); err != nil {
 		return mover.Result{}, err
 	}
 	if job.Spec.Stop {
-		// Coordinate the stop across concurrent runs of the same container (an
-		// app backed up to several targets at once): stop once, start once.
-		cs := o.colds.get(job.Container)
-		if err := cs.hold(func() error {
-			log.Info("stopping container for cold backup", "container", job.Container)
-			return o.quiesce.Stop(ctx, job.Container)
-		}); err != nil {
-			return mover.Result{}, err
+		stopAttempted = true
+		log.Info("stopping container for cold backup", "container", job.Container)
+		if err := o.quiesce.Stop(ctx, job.Container); err != nil {
+			return mover.Result{}, fmt.Errorf("stop for backup: %w", err)
 		}
-		// Always attempt to restart (even on mover failure or shutdown); the last
-		// concurrent holder does it.
-		defer cs.release(func() {
-			if err := o.quiesce.Start(context.WithoutCancel(ctx), job.Container); err != nil {
-				log.Error("failed to restart container after cold backup", "container", job.Container, "error", err)
-			}
-		})
 	}
 
 	// Snapshot sources after pre-hooks and any cold stop, so a snapshot captures
 	// dumped/quiesced data. "none" yields live source mounts.
-	srcMounts, snapCleanup, err := o.sourceMountsFor(ctx, job)
+	srcMounts, cleanup, err := o.sourceMountsFor(ctx, job)
+	snapCleanup = cleanup
 	if err != nil {
 		return mover.Result{}, err
 	}
-	// Destroy the snapshot when the run ends — unless the mover is left running
-	// on shutdown (set below): then it must survive for the surviving backup and
-	// is cleaned by a later reap once that mover exits.
-	keptMover := false
-	defer func() {
-		if !keptMover {
-			snapCleanup(context.WithoutCancel(ctx))
-		}
-	}()
 	cacheMs, binds := o.cacheAndRepo(target, job.App)
 	mounts := append(srcMounts, cacheMs...)
 
@@ -100,22 +115,25 @@ func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target 
 		Env:            env,
 		Mounts:         mounts,
 		Binds:          binds,
-		KeepOnShutdown: !job.Spec.Stop,
+		KeepOnShutdown: !job.Spec.Stop && len(job.Spec.PreHooks) == 0 && len(job.Spec.PostHooks) == 0,
 		Labels:         o.moverLabels(target, job.App, "backup"),
 		Retain:         true,
 		Node:           job.Node,
 	}
 	log.Debug("spawning mover", "name", req.Name, "image", req.Image, "user", req.User, "sources", len(srcMounts))
+	req.Labels[mover.LabelSourceContainer] = job.Container
 	res, kept, runErr := o.eng.RunMover(ctx, req)
 	keptMover = kept
 
-	// Post-hooks run regardless of the mover outcome, and must survive a
-	// timeout/shutdown cancel of ctx (they may revert pre-hook state, e.g. take
-	// a database out of backup mode), so run them on a fresh bounded context.
-	postCtx, postCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
-	defer postCancel()
-	if err := o.runHooks(postCtx, job, job.Spec.PostHooks, "post", log); err != nil {
-		log.Error("post-hook failed", "error", err)
+	if runErr != nil && !kept {
+		// Runtime removal can fail after cancellation. Confirm exit before any
+		// cleanup that could invalidate data still mounted by that mover.
+		checkCtx, cancel := cleanupContext(ctx)
+		if err := o.requireNoReaders(checkCtx, job.App, job.Container); err != nil {
+			keptMover = true
+			runErr = errors.Join(runErr, err)
+		}
+		cancel()
 	}
 	return res, runErr
 }
@@ -233,7 +251,17 @@ type RestoreOptions struct {
 // staging directory (safe; the app need not exist). Otherwise it restores
 // in-place into the app's live volumes (job required), optionally stopping the
 // app first. restic output is written to out.
-func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discovery.Job, target api.Target, opts RestoreOptions, out io.Writer) error {
+func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discovery.Job, target api.Target, opts RestoreOptions, out io.Writer) (retErr error) {
+	if opts.Into == "" {
+		releaseApp, err := o.lifecycles.lock(ctx, lifecycleKey(app, sourceContainer(job)))
+		if err != nil {
+			return err
+		}
+		defer releaseApp()
+		if err := o.requireNoReaders(ctx, app, sourceContainer(job)); err != nil {
+			return err
+		}
+	}
 	unlock := o.locks.lock(target.Name + "|" + app)
 	defer unlock()
 
@@ -259,14 +287,23 @@ func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discover
 		if opts.Stop {
 			log := o.log.With("app", app, "target", target.Name)
 			log.Info("stopping container for in-place restore", "container", job.Container)
-			if err := o.quiesce.Stop(ctx, job.Container); err != nil {
-				return err
-			}
 			defer func() {
-				if err := o.quiesce.Start(context.WithoutCancel(ctx), job.Container); err != nil {
-					log.Error("failed to restart container after restore", "container", job.Container, "error", err)
+				checkCtx, checkCancel := cleanupContext(ctx)
+				err := o.requireNoReaders(checkCtx, app, sourceContainer(job))
+				checkCancel()
+				if err != nil {
+					retErr = errors.Join(retErr, fmt.Errorf("restart after restore deferred: %w", err))
+					return
+				}
+				cleanupCtx, cancel := cleanupContext(ctx)
+				defer cancel()
+				if err := o.quiesce.Start(cleanupCtx, job.Container); err != nil {
+					retErr = errors.Join(retErr, fmt.Errorf("restart after restore: %w", err))
 				}
 			}()
+			if err := o.quiesce.Stop(ctx, job.Container); err != nil {
+				return fmt.Errorf("stop for restore: %w", err)
+			}
 		}
 	}
 
@@ -281,6 +318,10 @@ func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discover
 		node = job.Node
 	}
 
+	labels := o.moverLabels(target, app, "restore")
+	if opts.Into == "" {
+		labels[mover.LabelSourceContainer] = sourceContainer(job)
+	}
 	_, _, err = o.eng.RunMover(ctx, mover.Request{
 		Name:    moverName(app, target.Name),
 		Image:   o.image,
@@ -292,7 +333,7 @@ func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discover
 		Mounts:  mounts,
 		Binds:   binds,
 		Stdout:  out,
-		Labels:  o.moverLabels(target, app, "restore"),
+		Labels:  labels,
 		Retain:  true,
 		Node:    node,
 	})

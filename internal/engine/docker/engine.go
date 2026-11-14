@@ -52,7 +52,10 @@ func (d *Engine) ListRuns(ctx context.Context, app, target string) ([]engine.Run
 	for _, c := range list {
 		ri, err := d.inspectRun(ctx, c.ID)
 		if err != nil {
-			continue
+			if cerrdefs.IsNotFound(err) {
+				continue // reaped between list and inspect
+			}
+			return nil, err // incomplete history cannot prove movers have exited
 		}
 		runs = append(runs, ri)
 	}
@@ -89,16 +92,17 @@ func (d *Engine) inspectRun(ctx context.Context, id string) (engine.RunInfo, err
 	if err != nil {
 		return engine.RunInfo{}, err
 	}
-	ri := engine.RunInfo{ID: insp.ID}
+	ri := engine.RunInfo{ID: insp.ID, Status: "running"}
 	if insp.Config != nil {
 		ri.App = insp.Config.Labels[mover.LabelApp]
+		ri.SourceContainer = insp.Config.Labels[mover.LabelSourceContainer]
 		ri.Target = insp.Config.Labels[mover.LabelTarget]
 		ri.Action = insp.Config.Labels[mover.LabelAction]
 	}
 	if insp.State != nil {
 		ri.ExitCode = insp.State.ExitCode
 		switch {
-		case insp.State.Running:
+		case insp.State.Running || (insp.State.Status != "exited" && insp.State.Status != "dead"):
 			ri.Status = "running"
 		case insp.State.ExitCode == 0:
 			ri.Status = "succeeded"

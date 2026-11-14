@@ -27,19 +27,19 @@ const (
 // Orchestrator runs backups. It is safe for concurrent use across different
 // repositories; runs against the same repository are serialised.
 type Orchestrator struct {
-	host    engine.Host
-	cfg     *config.Config
-	eng     engine.Engine
-	hooks   engine.Hooks
-	quiesce engine.Quiescer
-	image   string
-	log     *slog.Logger
-	locks   keyedMutex
-	cacheMu sync.Mutex
-	cacheOK bool
-	sem     chan struct{}          // caps concurrent backups when SABON_MAX_PARALLEL > 0
-	snaps   []snapshot.Snapshotter // source-snapshot providers, supplied by the runtime (Docker: zfs; swarm: none); selected per run by mode
-	colds   coldStops              // coordinates cold-backup container stops
+	host       engine.Host
+	cfg        *config.Config
+	eng        engine.Engine
+	hooks      engine.Hooks
+	quiesce    engine.Quiescer
+	image      string
+	log        *slog.Logger
+	locks      keyedMutex
+	cacheMu    sync.Mutex
+	cacheOK    bool
+	sem        chan struct{}          // caps concurrent backups when SABON_MAX_PARALLEL > 0
+	snaps      []snapshot.Snapshotter // source-snapshot providers, supplied by the runtime (Docker: zfs; swarm: none); selected per run by mode
+	lifecycles lifecycleLocks         // serialises source mutation and recovery across named specs/targets
 }
 
 // New returns an Orchestrator. image is the resolved mover image reference.
@@ -54,7 +54,6 @@ func New(cfg *config.Config, image string, eng engine.Engine, hooks engine.Hooks
 		log:     log,
 		snaps:   snaps,
 		locks:   newKeyedMutex(),
-		colds:   newColdStops(),
 	}
 	if cfg.MaxParallel > 0 {
 		o.sem = make(chan struct{}, cfg.MaxParallel)
@@ -112,59 +111,6 @@ func (k *keyedMutex) lock(key string) func() {
 	k.mu.Unlock()
 	mu.Lock()
 	return mu.Unlock
-}
-
-// coldStops coordinates cold-backup container stops across concurrent runs of
-// the same container (an app backed up to several targets at once): the first
-// run to need it stops the container, the last to finish starts it again — so
-// overlapping cold backups share one downtime and none reads a container that a
-// sibling run has already restarted.
-type coldStops struct {
-	mu sync.Mutex
-	m  map[string]*coldStop
-}
-
-func newColdStops() coldStops { return coldStops{m: map[string]*coldStop{}} }
-
-func (c *coldStops) get(container string) *coldStop {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	cs, ok := c.m[container]
-	if !ok {
-		cs = &coldStop{}
-		c.m[container] = cs
-	}
-	return cs
-}
-
-// coldStop reference-counts one container's cold-backup holders.
-type coldStop struct {
-	mu   sync.Mutex
-	refs int
-}
-
-// hold registers a cold-backup holder, running stop the first time (refs 0->1).
-// A failed stop is not counted, so the next holder retries it.
-func (c *coldStop) hold(stop func() error) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.refs == 0 {
-		if err := stop(); err != nil {
-			return err
-		}
-	}
-	c.refs++
-	return nil
-}
-
-// release drops a holder, running start when the last one leaves (refs 1->0).
-func (c *coldStop) release(start func()) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.refs--
-	if c.refs == 0 {
-		start()
-	}
 }
 
 func sanitize(s string) string {

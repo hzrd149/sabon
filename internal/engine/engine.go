@@ -20,14 +20,15 @@ import (
 // container/task so run history survives a sabon restart. The id is the mover
 // container id, and its logs are the restic output.
 type RunInfo struct {
-	ID         string    `json:"id"`
-	App        string    `json:"app"`
-	Target     string    `json:"target"`
-	Action     string    `json:"action"` // backup | check | prune | restore
-	Status     string    `json:"status"` // running | succeeded | failed
-	ExitCode   int       `json:"exit_code"`
-	StartedAt  time.Time `json:"started_at"`
-	FinishedAt time.Time `json:"finished_at,omitzero"`
+	ID              string    `json:"id"`
+	App             string    `json:"app"`
+	SourceContainer string    `json:"source_container,omitempty"` // source identity shared by named backup specs
+	Target          string    `json:"target"`
+	Action          string    `json:"action"` // backup | check | prune | restore
+	Status          string    `json:"status"` // running | succeeded | failed
+	ExitCode        int       `json:"exit_code"`
+	StartedAt       time.Time `json:"started_at"`
+	FinishedAt      time.Time `json:"finished_at,omitzero"`
 }
 
 // Engine runs movers and exposes their history. Implementations decide whether a

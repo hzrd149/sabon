@@ -26,13 +26,18 @@ one **mover** container per `(app, target)` pair and the mover does the work:
 5. **Retention** — `restic forget` applies the target's (or the label's
    per-target override) retention policy, *marking* old snapshots. Repacking to
    reclaim space is a separate `prune` job (see below), so backups stay fast.
-6. **postHooks** — any cleanup / success hooks.
-7. The mover exits; the orchestrator reaps it and records metrics.
+6. The mover exits; the orchestrator releases source snapshots and attempts
+   any cold restart, then **postHooks** cleanup (also on preparation failures).
+7. The orchestrator records the final lifecycle outcome, including cleanup
+   failures. A created snapshot alone does not imply success.
 
 Runs against the **same repository** are serialized (per-repo lock), so retention
 and prune never collide with a concurrent backup. Different apps back up in
-parallel. If sabon crashes mid-backup the mover keeps running and finishes on its
-own — see [Architecture](architecture.md#lifecycle-and-robustness).
+parallel. Backup lifecycles sharing a source container are serialized across
+named app specs and targets, protecting shared hook artifacts. Plain live backups can leave movers
+running on shutdown; hook-bearing and cold backups require recovery before
+reporting success. See [Hooks](hooks.md#tips) for cleanup and surviving-mover
+semantics and [Architecture](architecture.md#lifecycle-and-robustness).
 
 ### Repositories
 

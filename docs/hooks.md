@@ -187,5 +187,37 @@ Compose (no interpolation) use a single `$`.
   container's env then `SABON_HOOK_ENV_<NAME>`; see [Credentials in hooks](#credentials-in-hooks).
 - A failing pre-hook fails the backup for that job (restic never runs against an
   incomplete dump); check the notification and `sabon_backups_total{result="error"}`.
-- `postHooks` run after the backup completes — useful for cleanup or a
-  success ping, but the database-consistency work belongs in `preHooks`.
+- `postHooks` are cleanup, **not success callbacks**. Once preparation starts,
+  they are attempted even if a pre-hook partially changes state and fails, the
+  cold stop fails, source snapshot preparation fails, or the mover fails. Make
+  them idempotent and safe when preparation completed only partially. A failing
+  pre-hook blocks the mover and all remaining pre-hooks.
+- Every post-hook is attempted in configured order, even if an earlier cleanup
+  fails. Each gets a fresh five-minute budget independent of backup cancellation
+  (a shorter hook `timeout` still applies). Cold restart is attempted before
+  post-hooks so exec-mode cleanup can run inside the application; restart has its
+  own five-minute budget. Context deadlines require runtime cooperation.
+- Backup lifecycles for the same source container are serialized across named
+  app specs and targets in one sabon
+  process, including the entire pre-hook/mover/cleanup sequence. This prevents a
+  second target overwriting a shared dump while the first reads it, or deleting
+  it prematurely. In-place restore uses the same exclusion. Each target produces
+  its own dump. When no source identity is available, exclusion falls back to
+  the app name. Different containers must use distinct artifacts; this is not a
+  cross-process hook lock.
+- Hook-bearing movers are not intentionally left running on graceful shutdown.
+  If a mover survives, or runtime inspection cannot establish that it exited,
+  cleanup is deferred and the operation fails explicitly. Source snapshots and
+  dump artifacts are retained. New runs check for surviving app movers before
+  starting hooks, including movers from an earlier daemon. New backup and
+  in-place restore movers carry `sabon.source-container`, allowing differently
+  named specs sharing a source to detect each other's readers. Older movers
+  without that label can only be matched by app name; cross-app exclusion for
+  those movers requires runtime-level source fencing. Verify mover exit
+  before manually recovering application state and removing artifacts. Deferred
+  hooks are not persisted or replayed automatically after a crash.
+- Post-hook and restart failures join the primary error in the final result.
+  A restic snapshot may exist even when the overall lifecycle fails. Failure
+  notifications include its ID when available; `sabon_backups_total` and the
+  last-success timestamp describe the **whole lifecycle**, not just snapshot
+  creation. Retained mover history describes the mover alone.

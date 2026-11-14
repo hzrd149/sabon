@@ -129,7 +129,8 @@ func (m *Metrics) ObserveWatchRestart() { m.watchRestarts.Inc() }
 // ObserveDeprecatedLabel records a use of a deprecated label.
 func (m *Metrics) ObserveDeprecatedLabel(label string) { m.deprecatedLbls.WithLabelValues(label).Inc() }
 
-// ObserveBackup records a backup run and its result stats.
+// ObserveBackup records the complete lifecycle outcome (including recovery).
+// Mover snapshot statistics alone do not imply a successful backup run.
 func (m *Metrics) ObserveBackup(app, target string, ok bool, dur time.Duration, filesNew int, dataAdded uint64) {
 	m.markSeen(app)
 	m.backups.WithLabelValues(app, target, result(ok)).Inc()

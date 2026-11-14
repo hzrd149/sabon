@@ -9,10 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/davidborzek/sabon/api"
 	"github.com/davidborzek/sabon/internal/config"
@@ -354,76 +351,6 @@ func TestSourceMountsForAutoForeignVolumeGoesLive(t *testing.T) {
 	}
 	if ms[0].Type != mount.TypeVolume || ms[0].Source != "nfsvol" {
 		t.Errorf("foreign volume must be mounted live by name, got %+v", ms[0])
-	}
-}
-
-func TestColdStopRefcount(t *testing.T) {
-	var cs coldStop
-	stops, starts := 0, 0
-	stop := func() error { stops++; return nil }
-	start := func() { starts++ }
-
-	if err := cs.hold(stop); err != nil {
-		t.Fatal(err)
-	}
-	if err := cs.hold(stop); err != nil { // second holder must not stop again
-		t.Fatal(err)
-	}
-	if stops != 1 {
-		t.Fatalf("stops = %d, want 1", stops)
-	}
-	cs.release(start)
-	if starts != 0 {
-		t.Fatalf("started while a holder remains: starts = %d", starts)
-	}
-	cs.release(start) // last holder starts
-	if starts != 1 {
-		t.Fatalf("starts = %d, want 1", starts)
-	}
-	// a fresh cold backup after everyone left stops again
-	if err := cs.hold(stop); err != nil {
-		t.Fatal(err)
-	}
-	if stops != 2 {
-		t.Fatalf("re-hold should stop again: stops = %d", stops)
-	}
-	cs.release(start)
-}
-
-func TestColdStopHoldStopError(t *testing.T) {
-	var cs coldStop
-	if err := cs.hold(func() error { return errors.New("boom") }); err == nil {
-		t.Fatal("hold must surface the stop error")
-	}
-	// a failed stop is not counted: the next holder retries and succeeds
-	stopped := false
-	if err := cs.hold(func() error { stopped = true; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	if !stopped {
-		t.Fatal("a failed stop must not be counted; next hold should retry it")
-	}
-}
-
-func TestColdStopConcurrent(t *testing.T) {
-	var cs coldStop
-	var stops, starts atomic.Int32
-	var wg sync.WaitGroup
-	for i := 0; i < 64; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_ = cs.hold(func() error { stops.Add(1); return nil })
-			time.Sleep(time.Millisecond)
-			cs.release(func() { starts.Add(1) })
-		}()
-	}
-	wg.Wait()
-	if got := stops.Load(); got != starts.Load() {
-		t.Fatalf("unbalanced stop/start: %d stops, %d starts", got, starts.Load())
-	}
-	if cs.refs != 0 {
-		t.Fatalf("refs = %d, want 0 after all released", cs.refs)
 	}
 }
 
