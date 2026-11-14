@@ -6,6 +6,12 @@ tags:
 
 # Restore
 
+Standalone `restore --in-place --stop` requires a shared durable
+`SABON_STATE_DIR` and preserves the application's original running state.
+Originally stopped containers remain stopped. Interrupted restores retain their
+cold hold while a surviving mover is active; use `sabon recover` to retry
+recovery. See [Cold recovery](backups.md#cold-recovery).
+
 Restore is the point of all this, so the docs lead here. Every `(app, target)`
 repository is **self-contained and encrypted**, so you can restore from any
 machine that can reach the target — even after the original host and app are

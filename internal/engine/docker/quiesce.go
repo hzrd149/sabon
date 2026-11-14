@@ -16,11 +16,17 @@ var _ engine.Quiescer = (*Quiescer)(nil)
 
 // Quiescer stops and starts the app container.
 type Quiescer struct {
-	cli client.APIClient
+	cli      client.APIClient
+	stateDir string
 }
 
 // NewQuiescer returns a container quiescer.
 func NewQuiescer(cli client.APIClient) *Quiescer { return &Quiescer{cli: cli} }
+
+// NewDurableQuiescer enables cold leases in a shared durable local directory.
+func NewDurableQuiescer(cli client.APIClient, stateDir string) *Quiescer {
+	return &Quiescer{cli: cli, stateDir: stateDir}
+}
 
 // Stop stops the container (used for cold backups).
 func (q *Quiescer) Stop(ctx context.Context, ref string) error {

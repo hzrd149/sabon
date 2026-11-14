@@ -8,6 +8,7 @@ import (
 
 	"github.com/davidborzek/sabon/api"
 	"github.com/davidborzek/sabon/internal/discovery"
+	"github.com/davidborzek/sabon/internal/engine"
 	"github.com/davidborzek/sabon/internal/mover"
 )
 
@@ -61,9 +62,26 @@ func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target 
 	// Arm recovery before invoking a pre-hook or stop: either can change state
 	// and then fail. Post-hooks must tolerate incomplete preparation.
 	stopAttempted, keptMover := false, false
+	var cold engine.ColdLease
+	acquireFailed := false
 	var snapCleanup func(context.Context)
 	defer func() {
-		if keptMover {
+		// Check before destroying snapshots or hook artifacts, including failures
+		// before RunMover. Release must still drop process ownership on every path.
+		if cold != nil {
+			checkCtx, cancel := cleanupContext(ctx)
+			if err := cold.CheckIdle(checkCtx); err != nil {
+				keptMover = true
+				retErr = errors.Join(retErr, err)
+			}
+			cancel()
+		}
+		if keptMover || acquireFailed {
+			if cold != nil {
+				cleanupCtx, cancel := cleanupContext(ctx)
+				retErr = errors.Join(retErr, cold.Release(cleanupCtx))
+				cancel()
+			}
 			retErr = errors.Join(retErr, fmt.Errorf("recovery deferred: mover may still be reading sources; snapshots and hook artifacts retained; verify mover exit and recover the app manually"))
 			return
 		}
@@ -72,7 +90,11 @@ func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target 
 			snapCleanup(cleanupCtx)
 			cancel()
 		}
-		if stopAttempted {
+		if cold != nil {
+			cleanupCtx, cancel := cleanupContext(ctx)
+			retErr = errors.Join(retErr, cold.Release(cleanupCtx))
+			cancel()
+		} else if stopAttempted {
 			cleanupCtx, cancel := cleanupContext(ctx)
 			if err := o.quiesce.Start(cleanupCtx, job.Container); err != nil {
 				retErr = errors.Join(retErr, fmt.Errorf("restart after backup: %w", err))
@@ -87,7 +109,15 @@ func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target 
 	if err := o.runHooks(ctx, job, job.Spec.PreHooks, "pre", log); err != nil {
 		return mover.Result{}, err
 	}
-	if job.Spec.Stop {
+	if durable, ok := o.quiesce.(engine.ColdAcquirer); job.Spec.Stop && ok {
+		cold, err = durable.AcquireCold(ctx, job.Container, job.Sources)
+		if err != nil {
+			// No handle need be returned: durable recovery alone can establish
+			// whether the stop happened and whether overlapping movers are idle.
+			acquireFailed = true
+			return mover.Result{}, err
+		}
+	} else if job.Spec.Stop {
 		stopAttempted = true
 		log.Info("stopping container for cold backup", "container", job.Container)
 		if err := o.quiesce.Stop(ctx, job.Container); err != nil {
@@ -122,6 +152,11 @@ func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target 
 	}
 	log.Debug("spawning mover", "name", req.Name, "image", req.Image, "user", req.User, "sources", len(srcMounts))
 	req.Labels[mover.LabelSourceContainer] = job.Container
+	if cold != nil {
+		if err := cold.AttachMover(ctx, &req); err != nil {
+			return mover.Result{}, err
+		}
+	}
 	res, kept, runErr := o.eng.RunMover(ctx, req)
 	keptMover = kept
 
@@ -274,6 +309,7 @@ func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discover
 	}
 	mounts, binds := o.cacheAndRepo(target, app)
 	spec := mover.Spec{App: app, Action: mover.ActionRestore, SnapshotID: opts.Snapshot, Include: opts.Include, ExtraArgs: target.ResticArgs, DestinationMarker: target.DestinationMarker, RequireExistingRepository: target.RequireExistingRepository}
+	var cold engine.ColdLease
 
 	if opts.Into != "" {
 		binds = append(binds, opts.Into+":"+restoreMount)
@@ -287,22 +323,36 @@ func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discover
 		if opts.Stop {
 			log := o.log.With("app", app, "target", target.Name)
 			log.Info("stopping container for in-place restore", "container", job.Container)
-			defer func() {
-				checkCtx, checkCancel := cleanupContext(ctx)
-				err := o.requireNoReaders(checkCtx, app, sourceContainer(job))
-				checkCancel()
+			if durable, ok := o.quiesce.(engine.ColdAcquirer); ok {
+				cold, err = durable.AcquireCold(ctx, job.Container, job.Sources)
+				if cold != nil {
+					defer func() {
+						cleanupCtx, cancel := cleanupContext(ctx)
+						defer cancel()
+						retErr = errors.Join(retErr, cold.Release(cleanupCtx))
+					}()
+				}
 				if err != nil {
-					retErr = errors.Join(retErr, fmt.Errorf("restart after restore deferred: %w", err))
-					return
+					return err
 				}
-				cleanupCtx, cancel := cleanupContext(ctx)
-				defer cancel()
-				if err := o.quiesce.Start(cleanupCtx, job.Container); err != nil {
-					retErr = errors.Join(retErr, fmt.Errorf("restart after restore: %w", err))
+			} else {
+				defer func() {
+					checkCtx, checkCancel := cleanupContext(ctx)
+					err := o.requireNoReaders(checkCtx, app, sourceContainer(job))
+					checkCancel()
+					if err != nil {
+						retErr = errors.Join(retErr, fmt.Errorf("restart after restore deferred: %w", err))
+						return
+					}
+					cleanupCtx, cancel := cleanupContext(ctx)
+					defer cancel()
+					if err := o.quiesce.Start(cleanupCtx, job.Container); err != nil {
+						retErr = errors.Join(retErr, fmt.Errorf("restart after restore: %w", err))
+					}
+				}()
+				if err := o.quiesce.Stop(ctx, job.Container); err != nil {
+					return fmt.Errorf("stop for restore: %w", err)
 				}
-			}()
-			if err := o.quiesce.Stop(ctx, job.Container); err != nil {
-				return fmt.Errorf("stop for restore: %w", err)
 			}
 		}
 	}
@@ -322,7 +372,7 @@ func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discover
 	if opts.Into == "" {
 		labels[mover.LabelSourceContainer] = sourceContainer(job)
 	}
-	_, _, err = o.eng.RunMover(ctx, mover.Request{
+	req := mover.Request{
 		Name:    moverName(app, target.Name),
 		Image:   o.image,
 		User:    user,
@@ -336,7 +386,13 @@ func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discover
 		Labels:  labels,
 		Retain:  true,
 		Node:    node,
-	})
+	}
+	if cold != nil {
+		if err := cold.AttachMover(ctx, &req); err != nil {
+			return err
+		}
+	}
+	_, _, err = o.eng.RunMover(ctx, req)
 	return err
 }
 

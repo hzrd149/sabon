@@ -65,6 +65,63 @@ back up to that target) fails instead of silently doing nothing.
 Set `SABON_RUN_ON_STARTUP=true` to run everything once at daemon startup before
 following the schedules.
 
+## Standalone cold recovery {#cold-recovery}
+
+Configure [shared durable state](configuration.md#sabon_state_dir) before enabling
+`stop: true` or a stopped in-place restore. Cold operations on one container are
+serialized across cooperating processes; different containers with overlapping
+recorded sources are rejected while an operation remains outstanding. Waits for
+ownership are cancellable. This is separate from restic repository locking.
+
+Before stopping an application, sabon persists its immutable container ID,
+original running state, source identities, and operation intent. Before launching
+the mover, it persists a unique mover identity and puts reserved
+`sabon.cold.operation` / `sabon.cold.container` labels on that mover. State files
+contain no repository credentials or hook environments.
+
+Recovery runs before daemon startup scheduling, on each resync interval, and at
+CLI backup/stopped-restore startup. It skips live owners. A surviving mover keeps
+the application stopped until it finishes; uncertain Docker responses or failed
+restart attempts retain the journal for retry. A previously stopped application
+stays stopped. If the original container was deleted, recovery never starts a
+replacement that happens to reuse its name.
+
+Run recovery explicitly with the same Docker connection and mounted state:
+
+```sh
+sabon recover
+# Container installation, reusing its state and connection:
+docker compose exec sabon /sabon recover
+```
+
+The command does not require the old targets file, mover image, or repository
+credentials. Pending/failed recovery returns an error; retry after dependent
+movers finish or Docker becomes available. One-shot installations need another
+invocation to perform that retry. Do not delete a pending journal or its lock
+files to bypass a held source.
+
+### Recovery boundaries
+
+- This coordinates same-host cooperating processes using one local durable
+  filesystem and one Docker daemon identity. Independent state directories,
+  network filesystems, and pre-upgrade movers without cold-operation identity
+  cannot be safely adopted. Drain old work before upgrading.
+- Source matching uses named-volume names and normalized bind paths (including
+  parent/child paths). Filesystem aliases, bind paths into a named volume, and
+  symlinks to the same storage are not a universal storage-identity mechanism.
+  Do not configure overlapping writers through different aliases.
+- External container starts/recreation, Docker restart-policy actions, and
+  non-cold operations or hooks that write the same source do not participate in
+  cold ownership. Keep those writers coordinated separately. Crash recovery
+  restores container state; it does not replay arbitrary pre/post hooks.
+- Docker requests and journal writes are not one transaction. An unacknowledged
+  Stop still observed as running remains pending rather than guessing that the
+  request failed. If it never settles, operator investigation is required.
+  Recovery of a stopped container relies on Docker's observed lifecycle state;
+  this is not a proof against every arbitrarily delayed daemon-side request or
+  storage/power-loss behavior. Unknown mover states and failed inspections keep
+  the source held. Do not treat an expired timeout as proof that work terminated.
+
 ## Volumes & storage drivers {#drivers}
 
 sabon backs a named volume up by **mounting it into the mover by name** — the
@@ -118,8 +175,9 @@ ways to get a consistent copy — choose per app:
   the live data directory. This yields a logical, point-in-time-consistent dump
   on any filesystem. See [Hooks](hooks.md).
 - **Whole-app quiesce → `stop: true`.** sabon stops the container for the
-  duration of the backup (cold backup) and restarts it afterwards — simple and
-  filesystem-agnostic, at the cost of a short downtime.
+  duration of the backup (cold backup) and restores its original running state
+  afterwards. Standalone cold operations require `SABON_STATE_DIR`; intentionally
+  stopped containers remain stopped. See [Cold recovery](#cold-recovery).
 - **Live files → usually fine.** Media and config files are individually
   consistent; restic copes with concurrent changes.
 - **Atomic snapshots → `snapshot: zfs` (or `auto`).** For large, un-stoppable

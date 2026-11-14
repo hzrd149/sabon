@@ -26,6 +26,21 @@ container up to a real restic repository, then lists and restores it.
 go test -tags e2e ./test/e2e/
 ```
 
+The standalone cold-recovery contract has a separate opt-in SIGKILL test. It
+creates application and sleeper-mover containers, kills the lease-owning child
+process, verifies the survivor blocks recovery, then checks original-state
+restoration. It never uses the default Docker socket. Point it only at a
+disposable daemon (for example isolated Docker-in-Docker):
+
+```sh
+SABON_COLD_E2E_DOCKER_HOST=tcp://127.0.0.1:<isolated-port> \
+  go test -tags cold_e2e ./internal/engine/docker -run '^TestColdDockerHardKill$' -v -count=1
+```
+
+Without the explicit endpoint it skips. This tests the durable lease/Docker
+boundary, not a complete restic backup. Ordinary unit tests also exercise
+cross-process advisory locking and SIGKILL without Docker.
+
 ### Extending sabon
 
 sabon discovers containers carrying backup labels, then for each one spawns an

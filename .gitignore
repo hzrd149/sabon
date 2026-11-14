@@ -8,3 +8,6 @@
 # test / coverage
 *.out
 *.tmp
+
+# persistent state used by the Compose example
+/examples/state/

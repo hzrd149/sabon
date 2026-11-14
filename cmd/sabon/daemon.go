@@ -51,6 +51,7 @@ func runDaemon(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	orch := newOrchestrator(cfg, image, rt, logger)
+	rt.recoverQuiesced(ctx, logger)
 	if n, err := orch.Reap(ctx); err != nil {
 		logger.Warn("reap orphan movers failed", "error", err)
 	} else if n > 0 {
@@ -61,7 +62,6 @@ func runDaemon(ctx context.Context, cmd *cli.Command) error {
 	} else if n > 0 {
 		logger.Info("reaped orphan snapshots", "count", n)
 	}
-	rt.recoverQuiesced(ctx, logger)
 
 	disc := rt.disc
 	sched := scheduler.New(logger)
@@ -109,6 +109,9 @@ func runDaemon(ctx context.Context, cmd *cli.Command) error {
 			debounce = nil
 			reconcileOnce(rec, logger)
 		case <-ticker.C:
+			if rt.mode == "standalone" {
+				rt.recoverQuiesced(ctx, logger)
+			}
 			reconcileOnce(rec, logger)
 			if n, err := orch.Reap(ctx); err == nil && n > 0 {
 				logger.Info("reaped exited movers", "count", n)

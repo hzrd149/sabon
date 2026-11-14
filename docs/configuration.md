@@ -26,6 +26,19 @@ Per-container backup policy lives in **labels**, documented separately in
 
 *default `sabon`* — Label namespace (`<prefix>.enable`, `<prefix>.backup`, …).
 
+### `SABON_STATE_DIR`
+
+*default: unset* — Absolute path to shared durable local storage. Required for
+standalone `stop: true` backups and `restore --in-place --stop`; unset or unusable
+storage fails the cold operation before stopping the application. All cooperating
+daemon and CLI processes controlling the same Docker daemon must use the same
+underlying directory, including different `SABON_INSTANCE` selectors. Mount it
+read/write and preserve it across orchestrator recreation. The filesystem must
+support advisory locks, atomic rename, and file/directory `fsync`; network
+filesystems and independent state directories on remote clients are unsupported.
+
+See [Cold recovery](backups.md#cold-recovery) for recovery behavior and limitations.
+
 ### `SABON_WATCH_BY_DEFAULT`
 
 *default `false`* — When `true`, back up every container unless it sets `<prefix>.enable=false`. When `false` (default), only containers with `<prefix>.enable=true`.

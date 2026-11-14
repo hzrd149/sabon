@@ -42,6 +42,9 @@ type ownershipMover struct {
 }
 
 func (e *ownershipMover) EnsureCache(context.Context, string) error { return nil }
+func (e *ownershipMover) ListRuns(context.Context, string, string) ([]engine.RunInfo, error) {
+	return nil, nil
+}
 func (e *ownershipMover) RunMover(_ context.Context, req mover.Request) (mover.Result, bool, error) {
 	select {
 	case e.runs <- req:
