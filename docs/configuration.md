@@ -218,6 +218,47 @@ Target name. Referenced from a label's `targets`, `schedule` and `retention` map
 
 **Local backend.** The repo for app `<app>` is `<path>/<app>`, bind-mounted into the mover at `/repo`.
 
+#### Destination guards
+
+By default, sabon creates missing local repository directories and initializes
+repositories as needed. For a host-mounted network destination, opt into a marker
+check to catch an absent mount that leaves a writable local directory behind:
+
+```yaml
+targets:
+  - name: guarded-local
+    path: /mnt/backup
+    destinationMarker: synthetic-backup-destination-01
+    requireExistingRepository: true
+```
+
+Provision `<path>/<app>/.sabon-destination` **yourself on the intended destination**
+for each app. Its exact content must match `destinationMarker`, with an optional
+final newline. Use a nonempty identity without surrounding whitespace. sabon
+never creates the marker. Symlinks and non-regular marker files are rejected.
+Guarded local repositories use strict bind mounts: the per-app directory must
+already exist, even if `requireExistingRepository` is false.
+
+The marker is read in the actual mover filesystem (on the selected Docker/Swarm
+node), before any restic command, including unlock, init, and maintenance actions.
+Missing/unreadable or mismatched markers fail the operation without initializing
+a fallback repository. With only the marker option, initialization on the verified
+destination remains allowed. With `requireExistingRepository: true`, a failed
+`restic cat config` probe fails the operation instead of attempting init; this
+includes wrong passwords and backend connectivity errors.
+
+`destinationMarker` is supported only with `path`, not remote `repo` backends.
+`requireExistingRepository` works with all backends, including SFTP: pre-initialize
+the remote per-app repository using restic, then enable it. It checks readability,
+not a particular repository identity. Guarded targets cannot override the repository
+through `env` or repository-selection flags in `resticArgs`.
+
+A marker is an accidental-fallback guard, **not proof of NFS durability or remote
+replication**. Do not copy it to the underlying local fallback directory. It does
+not prevent a mount changing after the check, and an established but unreachable
+NFS mount can still hang or fail. Enforce mount dependencies externally, or use a
+Docker-managed network filesystem volume that fails to mount, where appropriate.
+
 #### `repo`
 
 **Remote backend.** A restic repository string with `{app}` and `${ENV}` placeholders, e.g. `s3:…/{app}`. See restic's [repository backends](https://restic.readthedocs.io/en/stable/030_preparing_a_new_repo.html) for the supported schemes (`s3:`, `rest:`, `sftp:`, `b2:`, …). The mover image ships an `ssh` client for `sftp:` and rclone for `rclone:`. OpenSSH refuses to run under a uid without a passwd entry, so `sftp:` needs the mover to run as root (the default `SABON_MOVER_USER`); with a non-root mover user, reach the SFTP server through `rclone:` instead, which has its own SFTP client.

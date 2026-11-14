@@ -55,6 +55,14 @@
     },
     "Target": {
       "properties": {
+        "destinationMarker": {
+          "type": "string",
+          "description": "Expected identity in the local per-app .sabon-destination marker; never created by sabon"
+        },
+        "requireExistingRepository": {
+          "type": "boolean",
+          "description": "Require a readable existing repository before any operation; never initialize"
+        },
         "name": {
           "type": "string",
           "description": "Target name"
