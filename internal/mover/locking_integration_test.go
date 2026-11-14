@@ -14,6 +14,7 @@ import (
 
 // This uses only temporary local repositories, no Docker or configured targets.
 // Put restic on PATH to exercise its real lock protocol as well as our unit tests.
+// It does not exercise a daemon or mover-container restart.
 func TestExecuteWithRealResticLock(t *testing.T) {
 	bin, err := exec.LookPath("restic")
 	if err != nil {
@@ -25,7 +26,7 @@ func TestExecuteWithRealResticLock(t *testing.T) {
 			name = "dead-owner-same-hostname"
 		}
 		t.Run(name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
 			dir := t.TempDir()
 			repo := filepath.Join(dir, "repo")
@@ -37,6 +38,18 @@ func TestExecuteWithRealResticLock(t *testing.T) {
 			}
 			if out, err := command("init").CombinedOutput(); err != nil {
 				t.Fatalf("init: %v\n%s", err, out)
+			}
+			const activePayload = "synthetic backup fixture\n"
+			wantPayload := activePayload
+			if orphan {
+				// Preserve a known completed snapshot before killing the next
+				// writer. Use distinct data so restoring the wrong run fails.
+				wantPayload = "completed seed before interrupted backup\n"
+				seed := command("backup", "--stdin", "--stdin-filename", "fixture")
+				seed.Stdin = strings.NewReader(wantPayload)
+				if out, err := seed.CombinedOutput(); err != nil {
+					t.Fatalf("seed backup: %v\n%s", err, out)
+				}
 			}
 			// Keep a real backup running by holding its stdin open. Its lock is
 			// owned by an independent process, not by any orchestrator mutex.
@@ -58,7 +71,7 @@ func TestExecuteWithRealResticLock(t *testing.T) {
 					_ = owner.Wait()
 				}
 			}()
-			if _, err := io.WriteString(stdin, "synthetic backup fixture\n"); err != nil {
+			if _, err := io.WriteString(stdin, activePayload); err != nil {
 				t.Fatal(err)
 			}
 			var lockPath string
@@ -135,6 +148,28 @@ func TestExecuteWithRealResticLock(t *testing.T) {
 			var output bytes.Buffer
 			if err := Execute(ctx, &output, &output); err != nil {
 				t.Fatalf("prune after lock release: %v\n%s", err, output.String())
+			}
+			// Verify all stored data after contention, cleanup, and pruning,
+			// not just that maintenance can acquire a lock again.
+			if out, err := command("check", "--read-data").CombinedOutput(); err != nil {
+				t.Fatalf("repository integrity after recovery: %v\n%s", err, out)
+			}
+			restoreDir := filepath.Join(dir, "restore")
+			raw, err = MarshalSpec(Spec{App: "fixture", Action: ActionRestore, SnapshotID: "latest", RestoreTarget: restoreDir})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(SpecEnv, raw)
+			output.Reset()
+			if err := Execute(ctx, &output, &output); err != nil {
+				t.Fatalf("restore after recovery: %v\n%s", err, output.String())
+			}
+			gotPayload, err := os.ReadFile(filepath.Join(restoreDir, "fixture"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(gotPayload) != wantPayload {
+				t.Fatalf("restored payload = %q, want %q", gotPayload, wantPayload)
 			}
 		})
 	}
