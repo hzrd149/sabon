@@ -337,7 +337,7 @@ func TestColdSharedSourceAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l2.Release(context.Background())
+	defer func() { _ = l2.Release(context.Background()) }()
 	f.containers["replacement"] = container.InspectResponse{ContainerJSONBase: &container.ContainerJSONBase{ID: "replacement", State: &container.State{Status: "exited"}}, Config: &container.Config{}}
 	if _, err := q.AcquireCold(context.Background(), "replacement", []discovery.Source{{Type: mount.TypeBind, Ref: "/shared/child"}}); err == nil {
 		t.Fatal("nested bind overlap admitted")
@@ -451,7 +451,7 @@ func TestColdLockProcessDeath(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		fmt.Println("locked")
 		select {}
 	}
@@ -487,7 +487,7 @@ func TestColdLockProcessDeath(t *testing.T) {
 	defer cancel()
 	if f, err := coldLock(ctx, path, true); !errors.Is(err, context.DeadlineExceeded) {
 		if f != nil {
-			f.Close()
+			_ = f.Close()
 		}
 		t.Fatalf("contended lock: %v", err)
 	}
@@ -499,5 +499,7 @@ func TestColdLockProcessDeath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
 }

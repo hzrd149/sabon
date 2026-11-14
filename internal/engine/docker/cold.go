@@ -67,7 +67,7 @@ func (q *Quiescer) coldDir(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("identify Docker daemon: %w", err)
 	}
 	if info.ID == "" {
-		return "", fmt.Errorf("Docker daemon has no stable identity")
+		return "", fmt.Errorf("docker daemon has no stable identity")
 	}
 	dir := filepath.Join(q.stateDir, "cold-v1", coldKey(info.ID))
 	// Sync every created directory's parent as well as the leaf.
@@ -139,7 +139,9 @@ func (q *Quiescer) AcquireCold(ctx context.Context, ref string, extra []discover
 	if err != nil {
 		return nil, err
 	}
-	defer gate.Close()
+	// Successful admission explicitly closes the gate below and checks its
+	// error. This fallback closes it on earlier failures or after that close.
+	defer func() { _ = gate.Close() }()
 	insp, err = q.cli.ContainerInspect(ctx, insp.ID)
 	if err != nil {
 		return nil, err
@@ -222,16 +224,18 @@ func (l *coldLease) AttachMover(ctx context.Context, req *mover.Request) error {
 	return nil
 }
 
-func (l *coldLease) Release(ctx context.Context) error {
+func (l *coldLease) Release(ctx context.Context) (resultErr error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.released {
 		return l.result
 	}
 	l.released = true
-	defer l.lock.Close()
-	l.result = l.q.recoverCold(ctx, l.dir, &l.record)
-	return l.result
+	defer func() {
+		resultErr = errors.Join(resultErr, l.lock.Close())
+		l.result = resultErr
+	}()
+	return l.q.recoverCold(ctx, l.dir, &l.record)
 }
 
 func (l *coldLease) CheckIdle(ctx context.Context) error {
