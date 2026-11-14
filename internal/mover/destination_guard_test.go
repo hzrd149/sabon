@@ -90,7 +90,7 @@ func TestDestinationMarkerAllowsInitialization(t *testing.T) {
 			if err := executeGuardSpec(t, Spec{App: "synthetic", Sources: []string{"/data"}, DestinationMarker: "synthetic-destination"}); err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(calls, []string{"cat", "init", "unlock", "backup"}) {
+			if !reflect.DeepEqual(calls, []string{"cat", "init", "backup"}) {
 				t.Fatalf("calls = %v", calls)
 			}
 		})
@@ -135,9 +135,9 @@ func TestRequireExistingRepositorySuccessAndDefaultCompatibility(t *testing.T) {
 			if err := executeGuardSpec(t, Spec{Sources: []string{"/data"}, RequireExistingRepository: require}); err != nil {
 				t.Fatal(err)
 			}
-			want := []string{"cat", "init", "unlock", "backup"}
+			want := []string{"cat", "init", "backup"}
 			if require {
-				want = []string{"cat", "cat", "unlock", "backup"}
+				want = []string{"cat", "cat", "backup"}
 			}
 			if !reflect.DeepEqual(calls, want) {
 				t.Fatalf("calls = %v, want %v", calls, want)
