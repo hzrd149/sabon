@@ -32,6 +32,10 @@ const resultMarker = "SABON_RESULT "
 // environment variables (RESTIC_REPOSITORY, RESTIC_PASSWORD, AWS_*, …) that
 // restic reads directly.
 type Spec struct {
+	// DestinationMarker is checked in /repo/.sabon-destination before restic.
+	DestinationMarker string `json:"destination_marker,omitempty"`
+	// RequireExistingRepository makes any failed config probe fatal, never init.
+	RequireExistingRepository bool `json:"require_existing_repository,omitempty"`
 	// App is the repository/app name; used as the primary restic tag and host.
 	App string `json:"app"`
 	// Host is the restic snapshot host (defaults to App).
@@ -132,6 +136,9 @@ func Execute(ctx context.Context, stdout, stderr io.Writer) error {
 		host = spec.App
 	}
 	globalArgs = spec.ExtraArgs
+	if err := guardDestination(ctx, spec); err != nil {
+		return err
+	}
 
 	switch spec.Action {
 	case "", ActionBackup:
@@ -160,6 +167,9 @@ func runBackup(ctx context.Context, spec Spec, host string, stdout, stderr io.Wr
 	// Ensure the repository is initialised. `restic cat config` is a cheap
 	// existence probe that does not lock the repo.
 	if err := runCmd(ctx, io.Discard, "cat", "config"); err != nil {
+		if spec.RequireExistingRepository {
+			return fmt.Errorf("required existing repository: %w", err)
+		}
 		_, _ = fmt.Fprintln(stderr, "sabon: initialising restic repository")
 		if err := runCmd(ctx, stderr, "init"); err != nil {
 			return fmt.Errorf("restic init: %w", err)
