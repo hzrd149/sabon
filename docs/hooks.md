@@ -239,3 +239,8 @@ Compose (no interpolation) use a single `$`.
   identity, even when shutdown survival was not requested. Cancelled hooks also
   retain their services. Missing task evidence and orphaned tasks block recovery;
   this conservative behavior does not implement full distributed worker fencing.
+  If a hook service-create response is lost, sabon retains the unique operation
+  name and resolves it to an exactly matching labelled service before checking
+  task termination. A missing service does not prove that creation was rejected.
+  If matching service/task evidence cannot be recovered, progress remains blocked
+  and manual recovery is required; this fence is also process-local.
