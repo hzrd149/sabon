@@ -252,6 +252,12 @@ includes wrong passwords and backend connectivity errors.
 the remote per-app repository using restic, then enable it. It checks readability,
 not a particular repository identity. Guarded targets cannot override the repository
 through `env` or repository-selection flags in `resticArgs`.
+For guarded targets, short flags must be standalone: `-q`, `-v`, `-h`, `-o VALUE`,
+and `-p FILE` are supported. Short-option clusters and attached short-option
+values are rejected, including benign forms such as `-vv` and `-oVALUE`, because
+clusters can hide repository selection (`-qr/other`). Use `-v -v`,
+`--verbose=2`, or `--option=VALUE` instead. These restrictions do not apply to
+unguarded targets. Long options such as `--retry-lock=1m` remain supported.
 
 A marker is an accidental-fallback guard, **not proof of NFS durability or remote
 replication**. Do not copy it to the underlying local fallback directory. It does

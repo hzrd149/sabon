@@ -26,6 +26,17 @@ func (t Target) validateDestinationGuard() error {
 		if strings.HasPrefix(arg, "--repo") || strings.HasPrefix(arg, "-r") && !strings.HasPrefix(arg, "--") {
 			return fmt.Errorf("target %q: destination guard forbids repository overrides in resticArgs", t.Name)
 		}
+		// restic accepts clustered short options: e.g. -qr/path selects a
+		// different repository after -q. Do not try to replicate its parser
+		// (including value-consuming options and future short flags). Require
+		// known standalone short flags; long forms support attached values.
+		if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") {
+			switch arg {
+			case "-q", "-v", "-h", "-o", "-p":
+			default:
+				return fmt.Errorf("target %q: destination guard requires standalone short flags (-q, -v, -h, -o, -p); use separate values or long options in resticArgs", t.Name)
+			}
+		}
 	}
 	return nil
 }
