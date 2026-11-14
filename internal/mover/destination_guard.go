@@ -30,7 +30,7 @@ func guardDestination(ctx context.Context, spec Spec) error {
 		if err != nil {
 			return fmt.Errorf("destination marker: %w", err)
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		data, err := io.ReadAll(io.LimitReader(f, int64(len(spec.DestinationMarker))+2))
 		if err != nil {
 			return fmt.Errorf("destination marker: %w", err)
