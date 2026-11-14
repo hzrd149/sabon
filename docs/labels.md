@@ -55,42 +55,19 @@ labels:
 
 #### Migrating existing repositories
 
-Compose defaults previously used only `<service>` (or `<service>-<name>` for
-named specs). To keep writing to an existing repository, set `repo` explicitly
-to that old name on its **single owner** before upgrading. For example, a
-Compose project `alpha` with service `db` can retain its existing `db` repository
-with `repo: db`; without that override it now uses `alpha-db`.
+Before upgrading, set `repo` to the old `<service>` (or `<service>-<name>`) name
+to retain its history: `repo: db` keeps `db` instead of adopting `alpha-db`.
+Nothing is renamed or moved automatically; new defaults start separate histories.
 
-No repository is renamed, moved, merged, or deleted automatically. Adopting the
-new default starts a separate repository/history. Old snapshots remain accessible
-through `sabon snapshots --app db --target <target>` and staging restore with
-`sabon restore --app db --target <target> --into <host-dir>`. In-place restore and
-app API operations require a discovered, uniquely owned app; pin `repo: db` to
-access the legacy app through those paths.
+Plain and named specs now both require a **single owner**. Give siblings distinct
+repos, or keep one owner with `extraVolumes`/`extraPaths` and disable the others.
+Conflicts fail discovery, one-shot backups and app API operations; reconciliation
+reports failure (`sabon_ready=0`) and suspends **all** backup/check/prune schedules
+until fixed. Already running operations are not cancelled.
 
-Previously documented sibling containers sharing a plain `repo` are now
-rejected, just like conflicting named specs. Assign distinct repositories, or
-choose one backup owner and include sibling data via `extraVolumes`/`extraPaths`
-(with appropriate hooks). Disable/remove the other backup specs. Compose
-replicas and ambiguous hyphen combinations in generated names also require
-explicit unique names or a single owner.
-
-Ownership conflicts fail discovery, validation, one-shot backups and app API
-operations with an error naming the repositories and owners. Scheduled
-reconciliation records failure (`sabon_ready=0`) and suspends **all** backup/check/prune schedules
-until the conflict is fixed; it never reports success with partial coverage.
-Already running operations are not cancelled. Ownership is checked within the
-current instance's discovered jobs, not across separate sabon instances or
-different target configurations pointing to the same physical repository.
-
-Claims are collected from enabled, successfully parsed backup specs before
-resolving sources. An owner with no sources, or whose container cannot be
-inspected, still conflicts with another owner of the same app. Malformed label
-documents retain the existing warning-and-skip behavior: a container/service
-whose labels cannot be parsed contributes no ownership claims. Disabled specs
-and containers/services outside the selected instance are also excluded. This
-ownership check does not change how non-conflicting source-resolution failures
-are handled.
+Validation covers enabled, parsed specs in the current instance before source
+resolution, so empty sources or failed inspect calls cannot hide an owner. It
+does not detect cross-instance or physical-repository aliases across targets.
 
 ### `auto`
 
@@ -141,8 +118,7 @@ Omit `targets` entirely to back up to every configured target with its defaults.
 
 ### `postHooks`
 
-*list · optional* — Cleanup hooks attempted after preparation begins, including
-on failure; not success callbacks. See [Hooks](hooks.md).
+*list · optional* — Hooks run after the backup. See [Hooks](hooks.md).
 
 ### `timeout`
 

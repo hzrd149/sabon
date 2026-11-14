@@ -3,7 +3,6 @@ package docker
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -43,24 +42,21 @@ func (f *fakeDocker) ContainerInspect(_ context.Context, name string) (container
 
 func TestListOwnershipBeforeSourceResolution(t *testing.T) {
 	for _, backupKey := range []string{"sabon.backup", "sabon.backup.data"} {
-		for _, inspectFails := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/inspectFails=%t", backupKey, inspectFails), func(t *testing.T) {
-				fd := &fakeDocker{list: []container.Summary{
-					{Names: []string{"/healthy"}, Labels: map[string]string{"sabon.enable": "true", "sabon.backup": "repo: shared\nauto: false\nextraPaths: [/synthetic/healthy]"}},
-					{Names: []string{"/unresolved"}, Labels: map[string]string{"sabon.enable": "true", backupKey: "repo: shared\nauto: true"}},
-				}}
-				if inspectFails {
-					fd.inspectErrors = map[string]error{"unresolved": errors.New("synthetic inspect failure")}
-				}
-				jobs, err := NewDiscoverer(fd, "sabon", false, "cache", "", testLogger()).List(context.Background())
-				if !errors.Is(err, discovery.ErrOwnership) || len(jobs) != 0 {
-					t.Fatalf("want ownership failure before dropping unresolved owner, got jobs=%+v err=%v", jobs, err)
-				}
-				if fd.inspectCalls != 0 {
-					t.Fatalf("resolved sources before checking ownership: %d inspect calls", fd.inspectCalls)
-				}
-			})
-		}
+		t.Run(backupKey, func(t *testing.T) {
+			fd := &fakeDocker{list: []container.Summary{
+				{Names: []string{"/healthy"}, Labels: map[string]string{"sabon.enable": "true", "sabon.backup": "repo: shared\nauto: false\nextraPaths: [/synthetic/healthy]"}},
+				{Names: []string{"/unresolved"}, Labels: map[string]string{"sabon.enable": "true", backupKey: "repo: shared\nauto: true"}},
+			}}
+			fd.inspectErrors = map[string]error{"unresolved": errors.New("synthetic inspect failure")}
+			jobs, err := NewDiscoverer(fd, "sabon", false, "cache", "", testLogger()).List(context.Background())
+			if !errors.Is(err, discovery.ErrOwnership) || len(jobs) != 0 {
+				t.Fatalf("want ownership failure before dropping unresolved owner, got jobs=%+v err=%v", jobs, err)
+			}
+			// Resolution must never start, so neither failed inspect nor empty mounts can hide an owner.
+			if fd.inspectCalls != 0 {
+				t.Fatalf("resolved sources before checking ownership: %d inspect calls", fd.inspectCalls)
+			}
+		})
 	}
 }
 
