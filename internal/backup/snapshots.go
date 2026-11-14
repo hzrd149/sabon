@@ -191,7 +191,9 @@ func (o *Orchestrator) autoMounts(ctx context.Context, job discovery.Job) ([]mou
 		snaps, cl, err := snap.Snapshot(ctx, job.App, perProvider[i])
 		if err != nil {
 			for _, c := range cleanups {
-				c(context.WithoutCancel(ctx))
+				cleanupCtx, cancel := cleanupContext(ctx)
+				c(cleanupCtx)
+				cancel()
 			}
 			return nil, noop, err
 		}

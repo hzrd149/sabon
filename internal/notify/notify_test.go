@@ -69,6 +69,11 @@ func TestDefaultTemplatesRender(t *testing.T) {
 	if body := render(n.body, fail, "x"); !strings.Contains(body, "boom") {
 		t.Errorf("backup-fail body = %q", body)
 	}
+	fail.SnapshotID = "1234567890"
+	fail.Error = "restart after backup: synthetic failure"
+	if body := render(n.body, fail, "x"); !strings.Contains(body, "snapshot 12345678 was created; overall lifecycle failed") || strings.Contains(body, "succeeded") {
+		t.Errorf("snapshot with failed recovery body = %q", body)
+	}
 
 	chk := Data{Event: "check", App: "immich", Target: "onsite", Error: "corrupt"}
 	if title := render(n.title, chk, "x"); !strings.Contains(title, "check FAILED") {

@@ -102,7 +102,8 @@ Omit `targets` entirely to back up to every configured target with its defaults.
 
 ### `postHooks`
 
-*list · optional* — Hooks run after the backup. See [Hooks](hooks.md).
+*list · optional* — Cleanup hooks attempted after preparation begins, including
+on failure; not success callbacks. See [Hooks](hooks.md).
 
 ### `timeout`
 

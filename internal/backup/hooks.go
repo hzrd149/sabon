@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -10,6 +11,20 @@ import (
 	"github.com/davidborzek/sabon/internal/discovery"
 	"github.com/davidborzek/sabon/internal/engine"
 )
+
+// Cleanup is best-effort across the entire list, not fail-fast like preparation.
+func (o *Orchestrator) runPostHooks(ctx context.Context, job discovery.Job, log *slog.Logger) error {
+	var errs []error
+	for i, h := range job.Spec.PostHooks {
+		postCtx, cancel := cleanupContext(ctx)
+		err := o.runOneHook(postCtx, job, h, "post", i, log)
+		cancel()
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
 
 func (o *Orchestrator) runHooks(ctx context.Context, job discovery.Job, hooks []api.Hook, phase string, log *slog.Logger) error {
 	for i, h := range hooks {

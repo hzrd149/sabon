@@ -24,11 +24,11 @@ type Data struct {
 	App        string        // app / repo name
 	Target     string        // target name
 	Instance   string        // owning sabon instance (SABON_INSTANCE), if set
-	OK         bool          // outcome
+	OK         bool          // overall lifecycle outcome, including application recovery
 	Duration   time.Duration // how long the operation took
-	SnapshotID string        // created snapshot (backup success)
-	FilesNew   int           // new files (backup success)
-	DataAdded  uint64        // bytes added to the repo (backup success)
+	SnapshotID string        // created snapshot, even if later recovery failed
+	FilesNew   int           // mover's reported new files
+	DataAdded  uint64        // mover's reported bytes added to the repo
 	Error      string        // failure cause ("" on success)
 }
 
