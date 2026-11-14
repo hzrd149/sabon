@@ -83,6 +83,15 @@ Already running operations are not cancelled. Ownership is checked within the
 current instance's discovered jobs, not across separate sabon instances or
 different target configurations pointing to the same physical repository.
 
+Claims are collected from enabled, successfully parsed backup specs before
+resolving sources. An owner with no sources, or whose container cannot be
+inspected, still conflicts with another owner of the same app. Malformed label
+documents retain the existing warning-and-skip behavior: a container/service
+whose labels cannot be parsed contributes no ownership claims. Disabled specs
+and containers/services outside the selected instance are also excluded. This
+ownership check does not change how non-conflicting source-resolution failures
+are handled.
+
 ### `auto`
 
 *bool · default `true`* — Include the labelled container's own bind mounts **and** named volumes automatically.

@@ -71,6 +71,8 @@ var ErrOwnership = errors.New("conflicting repository ownership")
 // ValidateOwnership requires one backup spec per app, even across disjoint
 // targets: app-only API lookups (including in-place restore) must be unambiguous.
 // It reports every conflict deterministically, rather than picking a winner.
+// Discoverers pass claims before resolving sources; only App, Container and
+// Backup are used, so an empty or temporarily unavailable owner still counts.
 func ValidateOwnership(jobs []Job) error {
 	owners := map[string][]string{}
 	for _, j := range jobs {
