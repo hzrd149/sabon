@@ -2,17 +2,19 @@ package backup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
 
 	"github.com/davidborzek/sabon/api"
 	"github.com/davidborzek/sabon/internal/discovery"
+	"github.com/davidborzek/sabon/internal/engine"
 	"github.com/davidborzek/sabon/internal/mover"
 )
 
 // RunTarget backs one app up to one target and returns the mover's result.
-func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target api.Target) (mover.Result, error) {
+func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target api.Target) (result mover.Result, resultErr error) {
 	// Per-target source view: drop volumes/paths this target excludes.
 	job.Sources = o.sourcesForTarget(job, target)
 	// Serialise runs against the same repository (target+app).
@@ -53,7 +55,14 @@ func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target 
 	if err := o.runHooks(ctx, job, job.Spec.PreHooks, "pre", log); err != nil {
 		return mover.Result{}, err
 	}
-	if job.Spec.Stop {
+	var cold engine.ColdLease
+	if durable, ok := o.quiesce.(engine.ColdAcquirer); job.Spec.Stop && ok {
+		cold, err = durable.AcquireCold(ctx, job.Container, job.Sources)
+		if err != nil {
+			return mover.Result{}, err
+		}
+		defer func() { resultErr = errors.Join(resultErr, cold.Release(context.WithoutCancel(ctx))) }()
+	} else if job.Spec.Stop {
 		// Coordinate the stop across concurrent runs of the same container (an
 		// app backed up to several targets at once): stop once, start once.
 		cs := o.colds.get(job.Container)
@@ -106,8 +115,25 @@ func (o *Orchestrator) RunTarget(ctx context.Context, job discovery.Job, target 
 		Node:           job.Node,
 	}
 	log.Debug("spawning mover", "name", req.Name, "image", req.Image, "user", req.User, "sources", len(srcMounts))
+	if cold != nil {
+		if err := cold.AttachMover(ctx, &req); err != nil {
+			return mover.Result{}, err
+		}
+	}
 	res, kept, runErr := o.eng.RunMover(ctx, req)
 	keptMover = kept
+	// A failed runner return does not establish mover termination (Docker
+	// removal may itself have failed). Keep snapshots for the dependency-aware
+	// snapshot reap rather than destroying a surviving cold mover's source.
+	if cold != nil && runErr != nil {
+		keptMover = true
+	}
+	if cold != nil {
+		if err := cold.CheckIdle(context.WithoutCancel(ctx)); err != nil {
+			keptMover = true
+			return res, errors.Join(runErr, err)
+		}
+	}
 
 	// Post-hooks run regardless of the mover outcome, and must survive a
 	// timeout/shutdown cancel of ctx (they may revert pre-hook state, e.g. take
@@ -233,7 +259,7 @@ type RestoreOptions struct {
 // staging directory (safe; the app need not exist). Otherwise it restores
 // in-place into the app's live volumes (job required), optionally stopping the
 // app first. restic output is written to out.
-func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discovery.Job, target api.Target, opts RestoreOptions, out io.Writer) error {
+func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discovery.Job, target api.Target, opts RestoreOptions, out io.Writer) (resultErr error) {
 	unlock := o.locks.lock(target.Name + "|" + app)
 	defer unlock()
 
@@ -246,6 +272,7 @@ func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discover
 	}
 	mounts, binds := o.cacheAndRepo(target, app)
 	spec := mover.Spec{App: app, Action: mover.ActionRestore, SnapshotID: opts.Snapshot, Include: opts.Include, ExtraArgs: target.ResticArgs}
+	var cold engine.ColdLease
 
 	if opts.Into != "" {
 		binds = append(binds, opts.Into+":"+restoreMount)
@@ -259,14 +286,22 @@ func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discover
 		if opts.Stop {
 			log := o.log.With("app", app, "target", target.Name)
 			log.Info("stopping container for in-place restore", "container", job.Container)
-			if err := o.quiesce.Stop(ctx, job.Container); err != nil {
-				return err
-			}
-			defer func() {
-				if err := o.quiesce.Start(context.WithoutCancel(ctx), job.Container); err != nil {
-					log.Error("failed to restart container after restore", "container", job.Container, "error", err)
+			if durable, ok := o.quiesce.(engine.ColdAcquirer); ok {
+				cold, err = durable.AcquireCold(ctx, job.Container, job.Sources)
+				if err != nil {
+					return err
 				}
-			}()
+				defer func() { resultErr = errors.Join(resultErr, cold.Release(context.WithoutCancel(ctx))) }()
+			} else {
+				if err := o.quiesce.Stop(ctx, job.Container); err != nil {
+					return err
+				}
+				defer func() {
+					if err := o.quiesce.Start(context.WithoutCancel(ctx), job.Container); err != nil {
+						log.Error("failed to restart container after restore", "container", job.Container, "error", err)
+					}
+				}()
+			}
 		}
 	}
 
@@ -281,7 +316,7 @@ func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discover
 		node = job.Node
 	}
 
-	_, _, err = o.eng.RunMover(ctx, mover.Request{
+	req := mover.Request{
 		Name:    moverName(app, target.Name),
 		Image:   o.image,
 		User:    user,
@@ -295,7 +330,13 @@ func (o *Orchestrator) RunRestore(ctx context.Context, app string, job *discover
 		Labels:  o.moverLabels(target, app, "restore"),
 		Retain:  true,
 		Node:    node,
-	})
+	}
+	if cold != nil {
+		if err := cold.AttachMover(ctx, &req); err != nil {
+			return err
+		}
+	}
+	_, _, err = o.eng.RunMover(ctx, req)
 	return err
 }
 

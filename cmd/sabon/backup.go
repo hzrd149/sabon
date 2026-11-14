@@ -36,6 +36,9 @@ func runBackupOnce(ctx context.Context, cmd *cli.Command) error {
 	}
 
 	m := metrics.New(version)
+	if rt.mode == "standalone" {
+		rt.recoverQuiesced(ctx, logger)
+	}
 	orch := newOrchestrator(cfg, image, rt, logger)
 	if _, err := orch.Reap(ctx); err != nil {
 		logger.Warn("reap orphan movers failed", "error", err)

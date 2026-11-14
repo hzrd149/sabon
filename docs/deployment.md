@@ -35,9 +35,11 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock   # Docker API (read + WRITE)
       - ./targets.yaml:/etc/sabon/targets.yaml:ro
+      - ./state:/var/lib/sabon        # shared persistent cold-operation state
       - /mnt/backup:/mnt/backup       # local target backend(s)
     environment:
       SABON_CONFIG: /etc/sabon/targets.yaml
+      SABON_STATE_DIR: /var/lib/sabon
       SABON_METRICS_ADDR: ":9333"
       SABON_LOG_LEVEL: info
       SABON_MOVER_USER: "0:0"         # movers run as root (default)
@@ -56,6 +58,18 @@ volumes:
 ```
 
 A few things worth calling out:
+
+- **Provision cold-operation state before starting.** For the example's
+  `user: "1000:1000"`, run `sudo install -d -m 0700 -o 1000 -g 1000 ./state`.
+  The image's default distroless `nonroot` user is UID/GID **65532**: use those
+  IDs instead when not overriding the user. Distroless has no shell or `chown`;
+  provision bind directories on the host, or initialize a named volume's
+  ownership with a separate provisioning container. Apply host UID mappings
+  when using rootless Docker. Every cooperating CLI/daemon must mount the same
+  underlying state directory; `docker compose exec sabon /sabon recover` reuses
+  it. Do not delete the state during upgrades. A writable container layer or
+  tmpfs is not durable storage, and sabon cannot infer deployment durability
+  from a successful write. See [Cold recovery](backups.md#cold-recovery).
 
 - **Local target backends must be visible to *movers*, not just the
   orchestrator.** sabon bind-mounts the same host path into each mover, so a local
@@ -80,8 +94,10 @@ docker run -d --name sabon \
   --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$PWD/targets.yaml:/etc/sabon/targets.yaml:ro" \
+  -v "$PWD/state:/var/lib/sabon" \
   -v /mnt/backup:/mnt/backup \
   -e SABON_CONFIG=/etc/sabon/targets.yaml \
+  -e SABON_STATE_DIR=/var/lib/sabon \
   -e SABON_METRICS_ADDR=":9333" \
   -e SABON_MOVER_USER="0:0" \
   -e RESTIC_PASSWORD="$RESTIC_PASSWORD" \
@@ -262,6 +278,7 @@ services:
       VOLUMES: 1       # mount volumes into movers
       EXEC: 1          # exec-mode hooks
       EVENTS: 1        # discovery event stream
+      INFO: 1          # runtime detection and durable cold daemon identity
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     # expose only to sabon, e.g. on a private network

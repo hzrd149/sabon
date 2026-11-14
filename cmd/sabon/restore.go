@@ -187,6 +187,9 @@ func runRestore(ctx context.Context, cmd *cli.Command) error {
 		Stop:     cmd.Bool("stop"),
 		Include:  cmd.StringSlice("include"),
 	}
+	if opts.Stop && inPlace && rt.mode == "standalone" {
+		rt.recoverQuiesced(ctx, logger)
+	}
 
 	var job *discovery.Job
 	if inPlace {

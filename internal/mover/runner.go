@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"sort"
 	"strings"
+	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
@@ -30,6 +33,9 @@ const (
 	LabelApp    = "sabon.app"
 	LabelTarget = "sabon.target"
 	LabelAction = "sabon.action"
+	// Cold operation identity is written to durable intent before mover creation.
+	LabelColdOperation = "sabon.cold.operation"
+	LabelColdContainer = "sabon.cold.container"
 )
 
 // Request is everything a runtime needs to run one mover. It is the shared
@@ -77,7 +83,7 @@ func containerConfig(req Request, specJSON string, labels map[string]string) *co
 
 // Run creates, starts and waits for one mover, returns its parsed Result, and
 // always removes the container. The mover's logs are attached to any error.
-func (r *Runner) Run(ctx context.Context, req Request) (Result, bool, error) {
+func (r *Runner) Run(ctx context.Context, req Request) (result Result, kept bool, retErr error) {
 	specJSON, err := MarshalSpec(req.Spec)
 	if err != nil {
 		return Result{}, false, err
@@ -115,7 +121,20 @@ func (r *Runner) Run(ctx context.Context, req Request) (Result, bool, error) {
 		if keep {
 			return
 		}
-		_ = r.cli.ContainerRemove(context.WithoutCancel(ctx), id, container.RemoveOptions{Force: true})
+		cleanup := context.WithoutCancel(ctx)
+		if req.Labels[LabelColdOperation] != "" {
+			// A cold lease must regain control even if Docker is unavailable.
+			// Its durable recovery gate, not this removal attempt, decides whether
+			// writers can resume. Surface removal failure to lifecycle cleanup.
+			var cancel context.CancelFunc
+			cleanup, cancel = context.WithTimeout(cleanup, 30*time.Second)
+			defer cancel()
+			if err := r.cli.ContainerRemove(cleanup, id, container.RemoveOptions{Force: true}); err != nil && !cerrdefs.IsNotFound(err) {
+				retErr = errors.Join(retErr, fmt.Errorf("remove cold mover: %w", err))
+			}
+			return
+		}
+		_ = r.cli.ContainerRemove(cleanup, id, container.RemoveOptions{Force: true})
 	}()
 
 	if err := r.cli.ContainerStart(ctx, id, container.StartOptions{}); err != nil {
@@ -223,6 +242,11 @@ func (r *Runner) Reap(ctx context.Context, keep int) (int, error) {
 	groups := map[string][]container.Summary{}
 	var stray []container.Summary
 	for _, c := range list {
+		// Cold recovery owns nonterminal movers, including never-started ones.
+		// A concurrent reaper must not race their create/start boundary.
+		if c.Labels[LabelColdOperation] != "" && c.State != "exited" && c.State != "dead" {
+			continue
+		}
 		if c.State == "running" || c.State == "restarting" {
 			continue
 		}

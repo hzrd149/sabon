@@ -18,6 +18,8 @@
 # first (the mover bind-mounts it directly, see below):
 #
 #   sudo mkdir -p /mnt/backup && sudo chown "$(id -u)" /mnt/backup
+# Cold backups also need persistent state writable by distroless nonroot:
+#   sudo install -d -m 0700 -o 65532 -g 65532 ./state
 name: sabon-example
 
 services:
@@ -38,6 +40,7 @@ services:
       VOLUMES: 1 # create/mount the restic cache + source volumes
       EXEC: 1 # run exec-mode hooks (e.g. pg_dump) in app containers
       EVENTS: 1 # stream container lifecycle events for discovery
+      INFO: 1 # runtime detection and stable daemon identity for cold recovery
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     restart: unless-stopped
@@ -52,6 +55,7 @@ services:
     environment:
       DOCKER_HOST: tcp://docker-socket-proxy:2375 # talk to the proxy, not the raw socket
       SABON_CONFIG: /etc/sabon/targets.yaml # the targets file mounted below
+      SABON_STATE_DIR: /var/lib/sabon # shared durable cold-operation journal
       SABON_RUN_ON_STARTUP: "true" # back up once on boot so the demo has snapshots
       SABON_LOG_LEVEL: info
       # restic repo password, passed through to every mover. Override via your
@@ -63,6 +67,7 @@ services:
       SABON_MOVER_IMAGE: sabon-mover:example
     volumes:
       - ./targets.yaml:/etc/sabon/targets.yaml:ro
+      - ./state:/var/lib/sabon # provision ownership above; preserve across recreation
       # The onsite repo lives here. This MUST be the same host path that the
       # onsite target's `path:` names, because the mover bind-mounts that host
       # path directly (via the Docker API) — not this container's mount. It is

@@ -63,10 +63,28 @@ type Quiescer interface {
 	Start(ctx context.Context, ref string) error
 }
 
+// ColdAcquirer optionally provides durable, cross-process cold ownership.
+// AcquireCold errors can leave a durable recovery obligation even though no
+// lease is returned. Callers must never compensate with Quiescer.Start.
+type ColdAcquirer interface {
+	AcquireCold(context.Context, string, []discovery.Source) (ColdLease, error)
+}
+
+// ColdLease holds exclusive ownership until Release. AttachMover must run before
+// launching source-dependent work. Release releases process ownership even on
+// error, but preserves durable recovery obligations until it is safe to resume.
+type ColdLease interface {
+	AttachMover(context.Context, *mover.Request) error
+	// CheckIdle gates destructive source cleanup after RunMover has returned.
+	// It may fence a never-started mover. It does not release ownership.
+	CheckIdle(context.Context) error
+	Release(context.Context) error
+}
+
 // Recoverer is an optional Quiescer capability: it brings back apps a previous
 // run stranded — e.g. a swarm service scaled to zero when the daemon crashed
-// between Stop and Start. Runtimes with nothing to recover (standalone) omit it;
-// the daemon discovers it by type assertion at startup.
+// between Stop and Start. The daemon discovers it by type assertion and retries
+// periodically; durable standalone recovery skips operations with live owners.
 type Recoverer interface {
 	RecoverQuiesced(ctx context.Context) (int, error)
 }

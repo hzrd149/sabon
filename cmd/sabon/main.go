@@ -37,6 +37,7 @@ func main() {
 		Version: version,
 		Action:  runDaemon,
 		Commands: []*cli.Command{
+			{Name: "recover", Usage: "Recover interrupted cold operations from durable state", Action: runRecover},
 			{Name: "backup", Usage: "Run all backups once and exit", Action: runBackupOnce, Flags: []cli.Flag{
 				&cli.StringFlag{Name: "app", Usage: "only back up this app"},
 				&cli.StringFlag{Name: "target", Usage: "only back up to this target (default: all of each app's targets)"},
@@ -222,7 +223,7 @@ func newRuntime(ctx context.Context, cli client.APIClient, cfg *config.Config, l
 	default:
 		rt.eng = docker.New(cli)
 		rt.disc = docker.NewDiscoverer(cli, cfg.LabelPrefix, cfg.WatchByDefault, cfg.CacheVolume, cfg.Instance, log)
-		rt.quiesce = docker.NewQuiescer(cli)
+		rt.quiesce = docker.NewDurableQuiescer(cli, cfg.StateDir)
 		rt.hooks = docker.NewHooks(cli)
 		rt.host = docker.NewHost(cli)
 		// The ZFS snapshotter is a standalone-Docker capability (a privileged
@@ -253,16 +254,15 @@ func detectRuntime(ctx context.Context, cli client.APIClient, override string) (
 	}
 }
 
-// recoverQuiesced brings back any app a previous run stranded at zero replicas
-// by crashing between a cold backup's Stop and Start. No-op on standalone.
+// recoverQuiesced retries recovery without interfering with live cold owners.
 func (rt *runtime) recoverQuiesced(ctx context.Context, log *slog.Logger) {
 	q, ok := rt.quiesce.(engine.Recoverer)
 	if !ok {
 		return
 	}
 	if n, err := q.RecoverQuiesced(ctx); err != nil {
-		log.Warn("recover quiesced services failed", "error", err)
+		log.Warn("recover quiesced apps failed", "error", err)
 	} else if n > 0 {
-		log.Info("recovered quiesced services", "count", n)
+		log.Info("recovered quiesced apps", "count", n)
 	}
 }

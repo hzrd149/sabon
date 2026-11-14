@@ -20,6 +20,7 @@ import (
 type Config struct {
 	LabelPrefix         string
 	Runtime             string // SABON_RUNTIME: "auto"(default)|"standalone"|"swarm" — which container runtime to drive
+	StateDir            string // SABON_STATE_DIR: shared durable local directory, required for standalone cold operations
 	WatchByDefault      bool
 	ConfigFile          string
 	ResyncInterval      time.Duration
@@ -54,6 +55,7 @@ type Config struct {
 func Load() (*Config, error) {
 	c := &Config{
 		Runtime:          env("SABON_RUNTIME", "auto"),
+		StateDir:         env("SABON_STATE_DIR", ""),
 		LabelPrefix:      env("SABON_LABEL_PREFIX", "sabon"),
 		WatchByDefault:   envBool("SABON_WATCH_BY_DEFAULT", false),
 		ConfigFile:       env("SABON_CONFIG", "/etc/sabon/targets.yaml"),
